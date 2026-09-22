@@ -523,3 +523,58 @@ test('dither posterises the stage and the PNG export', async ({ page }) => {
   const [, png] = await downloadFrom(page, () => page.getByRole('button', { name: 'Download PNG' }).click());
   expect(await twoLevelShare(page, png)).toBeGreaterThan(0.98);
 });
+
+/** Connected white shapes (4-neighbour, over 30 px) in a screenshot: letters or melted words. */
+function whiteShapes(page, png) {
+  return page.evaluate(async (b64) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${b64}`;
+    await img.decode();
+    const { width: w, height: h } = img;
+    const canvas = Object.assign(document.createElement('canvas'), { width: w, height: h });
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    const { data } = ctx.getImageData(0, 0, w, h);
+    const ink = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) ink[i] = data[4 * i] > 200 && data[4 * i + 1] > 200 && data[4 * i + 2] > 200 ? 1 : 0;
+    let shapes = 0;
+    const stack = [];
+    for (let start = 0; start < w * h; start++) {
+      if (!ink[start]) continue;
+      let area = 0;
+      ink[start] = 0;
+      stack.push(start);
+      while (stack.length) {
+        const i = stack.pop();
+        area += 1;
+        const x = i % w;
+        for (const j of [i - w, i + w, x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1]) {
+          if (j >= 0 && j < w * h && ink[j]) {
+            ink[j] = 0;
+            stack.push(j);
+          }
+        }
+      }
+      if (area > 30) shapes += 1;
+    }
+    return shapes;
+  }, png.toString('base64'));
+}
+
+test('goo melts the letters of each word together but keeps words apart', async ({ page }) => {
+  await freezeWarp(page);
+  await setRange(page, 'Stretch', 0);
+  await setRange(page, 'Italic', 0);
+  await page.getByRole('switch', { name: 'Sticker body & outline' }).click();
+  await pause(page);
+  const shapesAt = async (goo) => {
+    await setRange(page, 'Goo', goo);
+    await page.waitForTimeout(400);
+    return whiteShapes(page, await stageShot(page));
+  };
+  const clean = await shapesAt(0);
+  const gooey = await shapesAt(0.35);
+  expect(clean).toBeGreaterThanOrEqual(24); // 27 letters, a couple touching at most
+  expect(gooey).toBeLessThan(clean / 2);
+  expect(gooey).toBeGreaterThanOrEqual(3); // three words never merge into one
+});

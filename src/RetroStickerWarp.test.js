@@ -30,6 +30,7 @@ import {
   cssToEm,
   designLayout,
   displayLines,
+  effectUniforms,
   emToCss,
   evenSize,
   fileNameFor,
@@ -38,6 +39,8 @@ import {
   fillStretchRow,
   foldTime,
   gaussianBlur,
+  glyphSoftnessEm,
+  gooMeltEm,
   graphemes,
   hexToRgb01,
   hitTestLayout,
@@ -384,6 +387,25 @@ describe('silhouetteField', () => {
   });
 });
 
+describe('goo', () => {
+  it('softens letters, melts each word together and keeps rows apart', () => {
+    const soft = (goo) => glyphSoftnessEm(goo);
+    expect(soft(0)).toBeGreaterThan(0);
+    expect(soft(1)).toBeGreaterThan(soft(0.35));
+    const u = (goo) => effectUniforms(sanitizeParams({ goo }));
+    expect(u(0.35).gooK).toBeCloseTo(gooMeltEm(0.35), 9);
+    expect(u(0).gooK / 2).toBeLessThan(0.04); // no goo: only touching letters join
+    expect(u(1).gooK).toBeGreaterThan(u(0.35).gooK);
+    // Two letters bridge when their gap is under half the melt radius. By default most
+    // letter pairs in a word stick (gaps ~0.05–0.1 em); at full goo, nearly all do…
+    expect(u(0.35).gooK / 2).toBeGreaterThan(0.08);
+    expect(u(1).gooK / 2).toBeGreaterThan(0.11);
+    // …while rows melt gently, so lines 0.11 em apart stay apart even at full goo.
+    expect(u(1).gooRowK).toBeLessThan(u(1).gooK);
+    expect(u(1).gooRowK / 2).toBeLessThan(0.08);
+  });
+});
+
 describe('letter classes', () => {
   it('alternates by letter and by row, so neighbours never share a field', () => {
     expect([letterClass(0, 0), letterClass(0, 1), letterClass(0, 2)]).toEqual([0, 1, 0]);
@@ -619,15 +641,16 @@ describe('stretch break points', () => {
     identity.filter((_, i) => i % 2 === 0).forEach((v) => expect(v).toBeCloseTo(0, 6));
   });
 
-  it('writes a letter table: display edge, field edge, lean and a validity flag', () => {
+  it('writes a letter table: display edge, field edge, lean and a letter/space/end flag', () => {
     const breaks = stretchBreaks(row, [2, 0.5, 0.8125]);
     const width = 6;
     const out = new Float32Array(width * 4 * 2).fill(-1);
-    fillGlyphRow(out, width, width, breaks, [0.3, 0, 0.1]);
+    fillGlyphRow(out, width, width, breaks, [0.3, 0, 0.1], [false, true, false]);
     const texel = (j) => Array.from(out.slice(4 * (width + j), 4 * (width + j) + 4));
     expect(texel(0)).toEqual([1, 1, expect.closeTo(0.3, 6), 1]);
     expect(texel(1)[0]).toBeCloseTo(2, 6);
     expect(texel(1)[1]).toBeCloseTo(1.5, 6);
+    expect(texel(1)[3]).toBe(0.5); // a space: a real cell, but no ink and no melt
     expect(texel(2)[2]).toBeCloseTo(0.1, 6);
     // After the last letter: its closing edges, then padding copies — never valid letters.
     expect(texel(3)).toEqual([expect.closeTo(3, 6), expect.closeTo(3, 6), 0, 0]);

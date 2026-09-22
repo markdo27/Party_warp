@@ -7,9 +7,10 @@
  *  1. Lines are laid out in em units and rasterised as four letter classes (row parity ×
  *     letter parity), so no letter's mask holds its neighbours' ink.
  *  2. Each class becomes a signed distance field (exact EDT with sub-pixel seeding, over
- *     its ink box only), lightly blurred for gooey glyphs; their union, closed and heavily
- *     blurred, is the blobby silhouette. Only text / typeface / spacing / goo changes pay
- *     for this CPU step.
+ *     its ink box only), lightly blurred to soften the letters; their union, closed and
+ *     heavily blurred, is the blobby silhouette. Only text / typeface / spacing / goo
+ *     changes pay for this CPU step. Goo also melts neighbouring letters of a word together
+ *     in the shader (a smooth union), so words stick while stretching and leaning.
  *  3. Every frame a tiny pass renders an animated warp field (gradient noise plus a
  *     rolling wave) and the main pass reads the distance fields through it:
  *        glyph  = d < weight + swell
@@ -621,11 +622,12 @@ export function fillStretchRow(out, start, texels, x0, dx, { F, D }) {
 
 /**
  * Writes one row of the letter table into `out` (RGBA per texel, `width` texels from texel
- * `start`): each letter's display edge, field edge, lean and a 1 flag. The shader draws every
- * letter through its own mapping, clipped to its own cell, so a lean never cuts into a
- * neighbour. Texels after the last letter hold its closing edges with a 0 flag.
+ * `start`): each letter's display edge, field edge, lean and a flag — 1 for a letter, 0.5 for
+ * a space (`fixed`), which is never drawn or melted across. The shader draws every letter
+ * through its own mapping, clipped to its own cell, so a lean never cuts into a neighbour.
+ * Texels after the last letter hold its closing edges with a 0 flag.
  */
-export function fillGlyphRow(out, start, width, { F, D }, slants = []) {
+export function fillGlyphRow(out, start, width, { F, D }, slants = [], fixed = []) {
   const n = D.length - 1;
   for (let j = 0; j < width; j++) {
     const o = 4 * (start + j);
@@ -634,13 +636,25 @@ export function fillGlyphRow(out, start, width, { F, D }, slants = []) {
     out[o] = D[e];
     out[o + 1] = F[e];
     out[o + 2] = real ? (slants[j] ?? 0) : 0;
-    out[o + 3] = real ? 1 : 0;
+    out[o + 3] = real ? (fixed[j] ? 0.5 : 1) : 0;
   }
 }
 
 /* ── Stage / view math (pure) ─────────────────────────────────────────────── */
 
 /** Shader-facing effect sizes in em, derived from the UI-facing settings. */
+/** Goo softness (em): the blur that rounds each letter, and the scale of the melt between them. */
+export const glyphSoftnessEm = (goo) => 0.012 + 0.05 * goo;
+
+/**
+ * Smooth-union radius (em) between letters of a word: two letters bridge when their gap is
+ * under half of it. It eases in, so the default goo already sticks each word together while
+ * full goo stays readable. Rows melt gently (GOO_ROW_MELT × softness) so stacked lines stay
+ * apart, and spaces never melt.
+ */
+export const gooMeltEm = (goo) => 0.06 + 0.17 * (1 - (1 - goo) ** 3);
+const GOO_ROW_MELT = 2;
+
 export function effectUniforms(p) {
   return {
     freq: 0.55 * p.frequency,
@@ -651,6 +665,8 @@ export function effectUniforms(p) {
     weight: p.weight,
     pad: p.pad,
     stroke: p.stroke,
+    gooK: gooMeltEm(p.goo),
+    gooRowK: GOO_ROW_MELT * glyphSoftnessEm(p.goo),
   };
 }
 
@@ -1082,7 +1098,7 @@ export function buildFieldData({ glyphSdf, sil, width, height, pxPerEm }, goo) {
   const inv = 1 / pxPerEm;
   glyphSdf.forEach((field, c) => {
     if (!field) return;
-    const blurred = gaussianBlur(field.data, field.width, field.height, (0.012 + 0.05 * goo) * pxPerEm);
+    const blurred = gaussianBlur(field.data, field.width, field.height, glyphSoftnessEm(goo) * pxPerEm);
     for (let j = 0; j < field.height; j++) {
       const row = (field.y + j) * width + field.x;
       for (let i = 0; i < field.width; i++) {
@@ -1598,6 +1614,8 @@ uniform float uWobble;
 uniform float uWeight;
 uniform float uPad;
 uniform float uStroke;
+uniform float uGooK;           // smooth-union radius that melts letters within a word (em)
+uniform float uGooRowK;        // gentler radius between rows and ring repeats (em)
 uniform float uSticker;        // 1 draws the silhouette and outer stroke
 uniform float uStretchOn;
 uniform vec2 uStretchDomain;   // x0, width (em)
@@ -1672,6 +1690,13 @@ float bodyX(vec2 q, float row) {
 
 const float EDGE_REACH = 0.5; // outer letters may swell past the row ends (em)
 
+// Polynomial smooth minimum: shapes closer than k melt together like the goo they are.
+// melt scales the bridge, so a neighbour can fade out of the union without a seam.
+float smin(float a, float b, float k, float melt) {
+  float h = max(k - abs(a - b), 0.0) / max(k, 1.0e-5);
+  return min(a, b) - melt * h * h * k * 0.25;
+}
+
 float classDist(vec4 f, int c) {
   return c == 0 ? f.r : c == 1 ? f.g : c == 2 ? f.b : f.a;
 }
@@ -1680,11 +1705,11 @@ float classDist(vec4 f, int c) {
 // so it may reach halfway into each neighbour's cell (crossbars, swollen ink); the clip
 // keeps out the next-but-one letters, which share its class.
 float letterDist(vec2 w, float pivot, int rowClass, int j, vec4 prev, vec4 g, vec4 next, vec4 next2, float t) {
-  if (g.w < 0.5) return 1.0e3;
+  if (g.w < 0.75) return 1.0e3; // spaces and padding carry no ink
   float span = next.x - g.x;
   float fx = g.y + (w.x - g.x) * (span > 1.0e-5 ? (next.y - g.y) / span : 1.0) + g.z * (w.y - pivot);
   float lo = j == 0 ? g.y - EDGE_REACH : 0.5 * (prev.y + g.y);
-  float hi = next.w < 0.5 ? next.y + EDGE_REACH : 0.5 * (next.y + next2.y);
+  float hi = next.w < 0.25 ? next.y + EDGE_REACH : 0.5 * (next.y + next2.y);
   float s = classDist(textureLod(uField, (vec2(fx, w.y) - uOrigin) / uSize, 0.0), rowClass + (j & 1));
   return max(s, max(lo - fx, fx - hi) + t);
 }
@@ -1705,8 +1730,13 @@ float glyphRow(vec2 w, int row, int fieldRow, float pivot, float t) {
   vec4 g4 = texelFetch(uGlyphs, ivec2(clamp(k + 2, 0, last), r), 0);
   vec4 g5 = texelFetch(uGlyphs, ivec2(clamp(k + 3, 0, last), r), 0);
   float d = letterDist(w, pivot, rowClass, k, g1, g2, g3, g4, t);
-  if (k > 0) d = min(d, letterDist(w, pivot, rowClass, k - 1, g0, g1, g2, g3, t));
-  if (k + 1 <= last) d = min(d, letterDist(w, pivot, rowClass, k + 1, g2, g3, g4, g5, t));
+  // A neighbour melts fully at the edge it shares with this letter and not at all at the far
+  // edge, where it leaves this three-letter window — so the melt never seams between cells.
+  // Over a space nothing melts, so words stay apart.
+  float across = clamp((w.x - g2.x) / max(g3.x - g2.x, 1.0e-5), 0.0, 1.0);
+  float melt = g2.w > 0.75 ? 1.0 : 0.0;
+  if (k > 0) d = smin(d, letterDist(w, pivot, rowClass, k - 1, g0, g1, g2, g3, t), uGooK, melt * (1.0 - across));
+  if (k + 1 <= last) d = smin(d, letterDist(w, pivot, rowClass, k + 1, g2, g3, g4, g5, t), uGooK, melt * across);
   return d;
 }
 
@@ -1716,7 +1746,8 @@ float glyphRow(vec2 w, int row, int fieldRow, float pivot, float t) {
 float glyphAt(vec2 w, float row, float pivot, float t) {
   if (uStretchOn < 0.5) {
     vec4 f = textureLod(uField, (w - uOrigin) / uSize, 0.0);
-    return min(min(f.r, f.g), min(f.b, f.a));
+    // Each row's even and odd letters melt (a space keeps words' same-class letters apart).
+    return smin(smin(f.r, f.g, uGooK, 1.0), smin(f.b, f.a, uGooK, 1.0), uGooRowK, 1.0);
   }
   int rows = textureSize(uStretch, 0).y;
   if (row > LOCKUP) return glyphRow(w, int(mod(row, float(rows))), 0, pivot, t);
@@ -1724,7 +1755,9 @@ float glyphAt(vec2 w, float row, float pivot, float t) {
   float r = clamp((w.y - uRowGeom.x) / uRowGeom.y, 0.0, float(rows - 1));
   int r0 = min(int(r), rows - 2);
   float c0 = uRowGeom.x + float(r0) * uRowGeom.y;
-  return min(glyphRow(w, r0, r0, c0, t), glyphRow(w, r0 + 1, r0 + 1, c0 + uRowGeom.y, t));
+  // Rows melt across the gap between them, fading out at row centres where the pair changes.
+  float f = r - float(r0);
+  return smin(glyphRow(w, r0, r0, c0, t), glyphRow(w, r0 + 1, r0 + 1, c0 + uRowGeom.y, t), uGooRowK, 4.0 * f * (1.0 - f));
 }
 
 Layer stickerLayer(vec2 p) {
@@ -1787,10 +1820,11 @@ vec4 coverages(Layer L, vec2 offset, float swellN, float wobble) {
   float t = uWeight + swellN * uSwell;
   vec2 d = fieldAt(w, L.row, L.pivot, t);
   if (L.wrap > 0.0) {
-    // Union with the neighbouring repeats (min distance), so their bodies merge into one.
+    // Union with the neighbouring repeats: bodies merge into one ring, letters melt across.
     float n = float(textureSize(uStretch, 0).y);
-    d = min(d, fieldAt(w + vec2(L.wrap, 0.0), mod(L.row - 1.0 + n, n), L.pivot, t));
-    d = min(d, fieldAt(w - vec2(L.wrap, 0.0), mod(L.row + 1.0, n), L.pivot, t));
+    vec2 before = fieldAt(w + vec2(L.wrap, 0.0), mod(L.row - 1.0 + n, n), L.pivot, t);
+    vec2 after = fieldAt(w - vec2(L.wrap, 0.0), mod(L.row + 1.0, n), L.pivot, t);
+    d = vec2(smin(smin(d.x, before.x, uGooRowK, 1.0), after.x, uGooRowK, 1.0), min(d.y, min(before.y, after.y)));
   }
   float glyph = cover(d.r - t);
   float body = uSticker * cover(d.g - uPad - wobble);
@@ -1956,6 +1990,8 @@ const EFFECT_UNIFORMS = [
   ['weight', 'uWeight'],
   ['pad', 'uPad'],
   ['stroke', 'uStroke'],
+  ['gooK', 'uGooK'],
+  ['gooRowK', 'uGooRowK'],
 ];
 
 const TEXTURE_UNIFORMS = [
@@ -2478,7 +2514,7 @@ function computeStretchFrame(scene, params, time, rowCount, cache) {
     const busy = hold > 0 ? stretchBumps(widths, time, seed, fixed).map((v) => v * hold) : null;
     const slants = italicSlants(widths, time, params.italic, seed, fixed, busy);
     fillStretchRow(cache.data, r * texels, texels, scene.fieldOrigin[0], dx, b);
-    fillGlyphRow(cache.glyphs, r * letters, letters, b, slants);
+    fillGlyphRow(cache.glyphs, r * letters, letters, b, slants, fixed);
     return { ...b, slants };
   });
   return {
