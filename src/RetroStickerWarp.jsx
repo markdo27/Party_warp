@@ -644,7 +644,7 @@ export function fillGlyphRow(out, start, width, { F, D }, slants = [], fixed = [
 
 /** Shader-facing effect sizes in em, derived from the UI-facing settings. */
 /** Goo softness (em): the blur that rounds each letter, and the scale of the melt between them. */
-export const glyphSoftnessEm = (goo) => 0.012 + 0.05 * goo;
+export const glyphSoftnessEm = (goo) => 0.012 + 0.06 * goo;
 
 /**
  * Smooth-union radius (em) between letters of a word: two letters bridge when their gap is
@@ -652,7 +652,7 @@ export const glyphSoftnessEm = (goo) => 0.012 + 0.05 * goo;
  * full goo stays readable. Rows melt gently (GOO_ROW_MELT × softness) so stacked lines stay
  * apart, and spaces never melt.
  */
-export const gooMeltEm = (goo) => 0.06 + 0.17 * (1 - (1 - goo) ** 3);
+export const gooMeltEm = (goo) => 0.06 + 0.23 * (1 - (1 - goo) ** 2);
 const GOO_ROW_MELT = 2;
 
 export function effectUniforms(p) {
@@ -1106,7 +1106,7 @@ export function buildFieldData({ glyphSdf, sil, width, height, pxPerEm }, goo) {
       }
     }
   });
-  const body = gaussianBlur(sil.data, sil.width, sil.height, (0.05 + 0.11 * goo) * (pxPerEm / 2));
+  const body = gaussianBlur(sil.data, sil.width, sil.height, (0.05 + 0.13 * goo) * (pxPerEm / 2));
   return { glyphs, body };
 }
 
@@ -2598,15 +2598,15 @@ function syncOverlays(live, stretch, caretEl, selectionEl) {
 
 const STYLES = `
 .rsw-mono{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
-.rsw-range{-webkit-appearance:none;appearance:none;width:100%;height:18px;background:transparent;cursor:pointer}
+.rsw-range{-webkit-appearance:none;appearance:none;width:100%;height:24px;background:transparent;cursor:pointer;touch-action:pan-y}
 .rsw-range:focus{outline:none}
 .rsw-range::-webkit-slider-runnable-track{height:4px;border-radius:999px;background:linear-gradient(90deg,${ACCENT} var(--pct),rgba(255,255,255,.12) var(--pct))}
-.rsw-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;margin-top:-5px;border:0;border-radius:999px;background:#fff;box-shadow:0 0 0 3px rgba(255,200,248,.22),0 2px 6px rgba(0,0,0,.6);transition:transform .12s}
+.rsw-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:16px;height:16px;margin-top:-6px;border:0;border-radius:999px;background:#fff;box-shadow:0 0 0 3px rgba(255,200,248,.22),0 2px 6px rgba(0,0,0,.6);transition:transform .12s}
 .rsw-range:active::-webkit-slider-thumb{transform:scale(1.18)}
 .rsw-range:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 4px ${ACCENT}}
 .rsw-range::-moz-range-track{height:4px;border-radius:999px;background:rgba(255,255,255,.12)}
 .rsw-range::-moz-range-progress{height:4px;border-radius:999px;background:${ACCENT}}
-.rsw-range::-moz-range-thumb{width:14px;height:14px;border:0;border-radius:999px;background:#fff;box-shadow:0 0 0 3px rgba(255,200,248,.22)}
+.rsw-range::-moz-range-thumb{width:16px;height:16px;border:0;border-radius:999px;background:#fff;box-shadow:0 0 0 3px rgba(255,200,248,.22)}
 .rsw-range:focus-visible::-moz-range-thumb{box-shadow:0 0 0 4px ${ACCENT}}
 .rsw-scroll{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.14) transparent}
 @keyframes rsw-blink{0%,49%{opacity:1}50%,100%{opacity:0}}
@@ -2673,6 +2673,7 @@ function Slider({ label, value, onChange, range, format, disabled = false }) {
         max={range.max}
         step={range.step}
         value={value}
+        aria-valuetext={format(value)}
         disabled={disabled}
         onChange={(e) => onChange(Number(e.target.value))}
         className="rsw-range disabled:cursor-not-allowed"
@@ -3964,7 +3965,10 @@ export default function RetroStickerWarp({
                 disabled={!params.sticker}
                 onChange={(v) => update('stroke', v)}
               />
-              <Slider label="Goo" value={params.goo} range={RANGES.goo} format={fmt.pct} onChange={(v) => update('goo', v)} />
+              <div className="space-y-1">
+                <Slider label="Goo" value={params.goo} range={RANGES.goo} format={fmt.pct} onChange={(v) => update('goo', v)} />
+                <p className="text-[11px] leading-relaxed text-white/55">Melt neighbouring letters into soft bridges. Word spaces stay clear.</p>
+              </div>
             </Section>
 
             <Section icon={Blend} title="Texture">
