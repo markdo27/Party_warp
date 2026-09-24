@@ -14,7 +14,6 @@ import {
   RANGES,
   TIME_FOLD,
   alignOffset,
-  badgeGeometry,
   bandGeometry,
   bandLine,
   boxSizesForGauss,
@@ -53,9 +52,9 @@ import {
   mapBreaks,
   motionClock,
   noise1,
+  ovalGeometry,
   pickVideoType,
   randomPalette,
-  ribbonGeometry,
   rowColToCaret,
   sanitizeInput,
   sanitizeParams,
@@ -871,27 +870,34 @@ describe('zip writer', () => {
   });
 });
 
-describe('design geometry', () => {
-  it('sizes the badge ring to whole repeats around the tagline', () => {
-    const g = badgeGeometry(3, 1, { width: 2, height: 1 });
-    expect(g.repeats).toBeGreaterThanOrEqual(2);
-    expect(g.radius).toBeCloseTo((g.repeats * 3) / (2 * Math.PI), 9);
-    expect(g.radius - 0.5).toBeGreaterThanOrEqual(Math.hypot(1, 0.5));
-    expect(g.outer).toBeCloseTo(g.radius + 0.5, 9);
-  });
-
-  it('keeps ribbons inside the free area', () => {
-    const [a, b] = ribbonGeometry({ width: 20, height: 12 }, { x: 0, y: 1, width: 20, height: 10 }, 1.5);
-    [a, b].forEach((r) => {
-      expect(Math.abs(r.amp) + 0.75).toBeLessThanOrEqual(5 + 1e-9);
-      expect(r.cy).toBeCloseTo(6, 9);
-      expect(r.k).toBeGreaterThan(0);
-    });
-    expect(Math.sign(a.amp)).not.toBe(Math.sign(b.amp));
-  });
-});
-
 describe('designLayout', () => {
+  it('keeps an oval frame visible even before text is entered', () => {
+    const L = layoutFor('oval', { scene: { ...scene, empty: true } });
+    expect(L.oval).toHaveLength(4);
+    expect(L.bounds.width).toBeGreaterThan(L.bounds.height);
+    expect(L.warpDomain.size).toEqual([L.bounds.width, L.bounds.height]);
+  });
+
+  it('fits short, long, and stacked text inside the oval with room for motion', () => {
+    for (const [width, height] of [[2, 0.7], [15, 0.7], [4, 5]]) {
+      const box = { x: -width / 2, y: -height / 2, width, height };
+      const params = sanitizeParams({ design: 'oval' });
+      const { ellipse: [cx, cy, rx, ry], bounds } = ovalGeometry(box, params);
+      expect(cx).toBe(0);
+      expect(cy).toBe(0);
+      expect((width / 2 / rx) ** 2 + (height / 2 / ry) ** 2).toBeLessThan(1);
+      expect(rx / ry).toBeCloseTo(params.ovalAspect);
+      expect(bounds.width).toBeGreaterThan(2 * rx);
+      expect(bounds.height).toBeGreaterThan(2 * ry);
+      const padded = ovalGeometry(box, { ...params, ovalPadding: 0.8 });
+      expect(padded.bounds.width).toBeGreaterThan(bounds.width);
+    }
+  });
+
+  it('falls back to a sticker for removed layouts in saved settings', () => {
+    for (const design of ['badge', 'ribbon']) expect(sanitizeParams({ design }).design).toBe('sticker');
+  });
+
   const scene = {
     empty: false,
     inkBox: { x: -2, y: -0.7, width: 4, height: 0.7 },
@@ -913,10 +919,6 @@ describe('designLayout', () => {
     });
   });
 
-  it('fits the whole badge inside the free area', () => {
-    const L = layoutFor('badge');
-    expect(2 * L.badge.outer * L.view.pxPerEm).toBeLessThanOrEqual(Math.min(free.width, free.height));
-  });
 
   it('alternates wallpaper colourways and swaps fill with silhouette', () => {
     const L = layoutFor('wallpaper');

@@ -20,12 +20,13 @@
  *  4. Letters stretch like extended cuts and lean into italics one at a time: per glyph
  *     widths and slants drift with 1D noise (the row width is preserved). A letter table
  *     lets the shader draw each letter through its own mapping; the body only stretches.
- *  5. Variations (marquee bands, badge ring, ribbons, wallpaper) remap the same fields in
+ *  5. Variations (marquee bands and wallpaper) remap the same fields in
  *     the same fragment shader.
  *  6. Print textures — halftone dot screen, ordered dither, film grain — run last, sized
  *     in screen pixels. SVG export reads raw coverage, so vectors stay clean.
  */
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { loadSvgLogo } from './svgLogo.js';
 import {
   AlignCenter,
   AlignLeft,
@@ -34,9 +35,9 @@ import {
   Check,
   ChevronDown,
   Copy,
+  Circle,
   Dices,
   Download,
-  CircleDot,
   Eraser,
   FileCode2,
   FileImage,
@@ -54,7 +55,6 @@ import {
   RotateCcw,
   Rows3,
   SlidersHorizontal,
-  Spline,
   Sticker,
   TextCursorInput,
   TriangleAlert,
@@ -64,7 +64,13 @@ import {
   X,
 } from 'lucide-react';
 
-const DESIGN_ICONS = { sticker: Sticker, bands: Rows3, badge: CircleDot, ribbon: Spline, wallpaper: LayoutGrid };
+const DESIGN_ICONS = { sticker: Sticker, bands: Rows3, wallpaper: LayoutGrid, oval: Circle };
+const PANEL_TABS = ['Content', 'Style', 'Motion', 'Export'];
+const MOTION_PRESETS = [
+  { name: 'Gentle', settings: { speed: 0.6, intensity: 0.2, frequency: 0.7, swell: 0.2, stretch: 0.15, italic: 0.1, boil: false } },
+  { name: 'Liquid', settings: { speed: 1, intensity: 0.5, frequency: 1, swell: 0.5, stretch: 0.35, italic: 0.3, boil: false } },
+  { name: 'Wild', settings: { speed: 1.4, intensity: 0.85, frequency: 1.4, swell: 0.75, stretch: 0.7, italic: 0.5, boil: false } },
+];
 
 /* ── Config ───────────────────────────────────────────────────────────────── */
 
@@ -130,9 +136,7 @@ const TAG_MAX_LINES = 2;
 const TAG_MAX_CHARS = 40;
 export const DEFAULT_TAGLINE = '29 — 31\naugust 2026';
 
-// Badge / wallpaper variations.
-const BADGE_GAP_EM = 0.34; // word space between ring repeats (their bodies still merge)
-const BADGE_INNER_GAP_EM = 0.3; // clearance between the ring and the centre tagline
+// Wallpaper variation.
 const TILE_GAP_EM = 0.08;
 const TILE_ANGLE = -0.21; // wallpaper tilt (rad, ≈ -12°)
 
@@ -180,21 +184,19 @@ export const BAND_THEMES = [
 export const DESIGN_LOOKS = Object.freeze({
   sticker: { pad: 0.18, stroke: 0.12, stretch: 0.35, italic: 0.3, intensity: 0.5, tracking: -0.01 },
   bands: { pad: 0.13, stroke: 0.065, stretch: 0.8, italic: 0.3, intensity: 0.4, tracking: -0.02 },
-  badge: { pad: 0.15, stroke: 0.09, stretch: 0.4, italic: 0.25, intensity: 0.35, tracking: -0.02 },
-  ribbon: { pad: 0.13, stroke: 0.065, stretch: 0.7, italic: 0.35, intensity: 0.35, tracking: -0.02 },
   wallpaper: { pad: 0.16, stroke: 0.1, stretch: 0.35, italic: 0.25, intensity: 0.45, tracking: -0.01 },
+  oval: { pad: 0.07, stroke: 0.1, stretch: 0.2, italic: 0.12, intensity: 0.3, tracking: -0.01, align: 'center', sticker: true },
 });
 
 /** The variations. `line` designs set the lockup on one line; the others keep its rows. */
 export const DESIGN_INFO = Object.freeze({
   sticker: { name: 'Sticker', blurb: 'One warped sticker lockup you can type on directly.', line: false },
   bands: { name: 'Marquee', blurb: 'Scrolling colour bands repeat the text with a tagline.', line: true },
-  badge: { name: 'Badge', blurb: 'The text orbits a round sticker with the tagline inside.', line: true },
-  ribbon: { name: 'Ribbon', blurb: 'Two wavy tapes cross the stage and scroll past each other.', line: true },
   wallpaper: { name: 'Wallpaper', blurb: 'A tilted sticker-bomb tiling with alternating colourways.', line: false },
+  oval: { name: 'Oval', blurb: 'Type a name or initials inside a soft oval ring. The frame grows to fit your text.', line: false },
 });
 export const DESIGNS = Object.keys(DESIGN_INFO);
-const MODE_INDEX = Object.freeze({ sticker: 0, bands: 1, badge: 2, ribbon: 3, wallpaper: 4 });
+const MODE_INDEX = Object.freeze({ sticker: 0, bands: 1, wallpaper: 2, oval: 3 });
 
 const ALIGNS = ['zigzag', 'left', 'center', 'right'];
 const EXPORT_SCOPES = ['whole', 'line'];
@@ -223,6 +225,9 @@ export const DEFAULTS = Object.freeze({
   pad: 0.18,
   stroke: 0.12,
   goo: 0.35,
+  ovalAspect: 2.4,
+  ovalRing: 0.16,
+  ovalPadding: 0.06,
   grain: 0.22,
   halftone: 0,
   dotSize: 9,
@@ -261,6 +266,9 @@ export const RANGES = Object.freeze({
   pad: { min: 0.04, max: 0.45, step: 0.005 },
   stroke: { min: 0, max: 0.25, step: 0.005 },
   goo: { min: 0, max: 1, step: 0.01 },
+  ovalAspect: { min: 1.4, max: 4, step: 0.1 },
+  ovalRing: { min: 0.03, max: 0.35, step: 0.01 },
+  ovalPadding: { min: 0.04, max: 0.8, step: 0.01 },
   grain: { min: 0, max: 1, step: 0.01 },
   halftone: { min: 0, max: 1, step: 0.01 },
   dotSize: { min: 3, max: 32, step: 1 },
@@ -713,6 +721,21 @@ export function stickerReach(params) {
 /** The ink box grown by everything drawn around it. Stretching preserves row widths. */
 export const stickerBounds = (inkBox, params) => expandBox(inkBox, stickerReach(params));
 
+/** Fit text inside an ellipse. Tight spacing lets the letters melt into the inner ring. */
+export function ovalGeometry(inkBox, params) {
+  const clearance = params.ovalPadding + Math.max(0, params.weight) + 0.045 * params.swell + ITALIC_MAX * params.italic * 0.4;
+  const a = inkBox.width / 2 + clearance;
+  const b = inkBox.height / 2 + clearance;
+  const rx = Math.hypot(a, params.ovalAspect * b);
+  const ry = rx / params.ovalAspect;
+  const cx = inkBox.x + inkBox.width / 2;
+  const cy = inkBox.y + inkBox.height / 2;
+  return {
+    ellipse: [cx, cy, rx, ry],
+    bounds: expandBox({ x: cx - rx, y: cy - ry, width: rx * 2, height: ry * 2 }, stickerReach(params)),
+  };
+}
+
 /**
  * Marquee band layout in em. Each period holds a sticker slot [0, stickerW) and a tagline
  * slot starting at `tagSlotX`. `slot` maps slot coordinates back into the two fields:
@@ -737,31 +760,6 @@ export function bandGeometry(inkBox, tagBox, params) {
   };
 }
 
-/**
- * Badge ring: whole repeats of the line around a circle that clears the tagline in the
- * middle. `period` is one repeat's length and `ringH` the line's height, both in em.
- */
-export function badgeGeometry(period, ringH, tagBox) {
-  const tagR = tagBox ? Math.hypot(tagBox.width / 2, tagBox.height / 2) : 0;
-  const minRadius = ringH / 2 + tagR + BADGE_INNER_GAP_EM;
-  const repeats = Math.max(2, Math.ceil((2 * Math.PI * minRadius) / period));
-  const radius = (repeats * period) / (2 * Math.PI);
-  return { repeats, radius, outer: radius + ringH / 2 };
-}
-
-/**
- * Two wavy tapes crossing the free area (em): centre line y, amplitude, wavenumber,
- * phase and scroll direction. Amplitudes have opposite signs so the tapes cross.
- */
-export function ribbonGeometry(stageEm, freeEm, bandH) {
-  const cy = freeEm.y + freeEm.height / 2;
-  const room = Math.max(0, freeEm.height / 2 - bandH / 2);
-  return [
-    { cy, amp: room * 0.7, k: (2 * Math.PI) / (stageEm.width * 1.15), phase: 0.4, dir: 1 },
-    { cy, amp: -room * 0.55, k: (2 * Math.PI) / (stageEm.width * 0.8), phase: 1.9, dir: -1 },
-  ];
-}
-
 export const PALETTE_KEYS = ['bg', 'sil', 'fill', 'line', 'tag'];
 
 /** Three colourways flattened into the shader's vec3[3] arrays, one Float32Array per key. */
@@ -773,50 +771,30 @@ export const packPalettes = (list) =>
  * palettes, stretch row count and the design's own geometry. Null until there's ink.
  */
 export function designLayout({ design, scene, tagBox, params, stage, free }) {
-  if (!scene || scene.empty || !stage.width || !stage.height) return null;
+  if (!scene || (scene.empty && design !== 'oval') || !stage.width || !stage.height) return null;
   const mode = MODE_INDEX[design] ?? 0;
   const sticker = { bg: params.bg, sil: params.sil, fill: params.fill, line: params.line, tag: params.line };
   const theme = BAND_THEMES.find((t) => t.id === params.bandTheme) ?? BAND_THEMES[0];
   const result = (layout) => ({ ...layout, mode, palettes: packPalettes(layout.colours), stageRgb: hexToRgb01(layout.stage) });
+
+  if (design === 'oval') {
+    const { ellipse, bounds } = ovalGeometry(scene.empty ? { x: -1.5, y: -0.4, width: 3, height: 0.8 } : scene.inkBox, params);
+    return result({
+      view: computeView(free, bounds, params.fontSize),
+      warpDomain: { origin: [bounds.x, bounds.y], size: [bounds.width, bounds.height] },
+      colours: [sticker, sticker, sticker], stage: params.bg,
+      rows: scene.layout.rows.length, bounds, oval: ellipse,
+    });
+  }
 
   if (design === 'sticker') {
     const bounds = stickerBounds(scene.inkBox, params);
     return result({ view: computeView(free, bounds, params.fontSize), warpDomain: null, colours: [sticker, sticker, sticker], stage: params.bg, rows: scene.layout.rows.length, bounds });
   }
 
-  if (design === 'badge') {
-    // A tight period: neighbouring repeats overlap and the shader unions them into one ring.
-    const reach = stickerReach(params);
-    const ringH = scene.inkBox.height + 2 * reach;
-    const period = scene.inkBox.width + BADGE_GAP_EM;
-    const ring = badgeGeometry(period, ringH, tagBox);
-    const extent = ring.outer + 0.1;
-    const bounds = { x: -extent, y: -extent, width: 2 * extent, height: 2 * extent };
-    return result({
-      view: computeView(free, bounds, params.fontSize * BAND_SCALE * 1.4),
-      warpDomain: { origin: [-extent, -extent], size: [2 * extent, 2 * extent] },
-      colours: [sticker, sticker, sticker],
-      stage: params.bg,
-      rows: ring.repeats,
-      focus: [0, 0],
-      bounds,
-      badge: {
-        ...ring,
-        period,
-        slot: [
-          scene.inkBox.x - BADGE_GAP_EM / 2,
-          scene.inkBox.y + scene.inkBox.height / 2,
-          tagBox ? tagBox.x + tagBox.width / 2 : 0,
-          tagBox ? tagBox.y + tagBox.height / 2 : 0,
-        ],
-      },
-    });
-  }
-
   // Whole-stage designs: the world origin sits at the stage's top-left corner.
   const pxPerEm = params.fontSize * BAND_SCALE;
   const stageEm = { width: stage.width / pxPerEm, height: stage.height / pxPerEm };
-  const freeEm = { x: free.x / pxPerEm, y: free.y / pxPerEm, width: free.width / pxPerEm, height: free.height / pxPerEm };
   const world = {
     view: { pxPerEm, center: [0, 0], centerEm: [0, 0] },
     warpDomain: { origin: [0, 0], size: [stageEm.width, stageEm.height] },
@@ -841,9 +819,6 @@ export function designLayout({ design, scene, tagBox, params, stage, free }) {
   }
 
   const band = bandGeometry(scene.inkBox, tagBox, params);
-  if (design === 'ribbon') {
-    return result({ ...world, band, colours: theme.bands, stage: params.bg, rows: 3, ribbons: ribbonGeometry(stageEm, freeEm, band.bandH) });
-  }
   return result({
     ...world,
     band,
@@ -1440,6 +1415,49 @@ function rasterizeSticker(canvas, { lines, family, lineSpacing, tracking, align,
   };
 }
 
+/** Crop transparent margins and feed the logo's alpha into the same field pipeline as type. */
+function rasterizeLogo(asset, maxSide) {
+  const sample = document.createElement('canvas');
+  sample.width = asset.width;
+  sample.height = asset.height;
+  const source = sample.getContext('2d', { willReadFrequently: true });
+  if (!source) throw new Error('Canvas 2D is unavailable.');
+  source.drawImage(asset.image, 0, 0, sample.width, sample.height);
+  const crop = readAlpha(source, sample.width, sample.height).box;
+  if (!crop) throw new Error('This SVG has no visible shapes. Check its fills and opacity.');
+  const [x0, y0, x1, y1] = crop;
+  const cropW = x1 - x0 + 1;
+  const cropH = y1 - y0 + 1;
+  const scale = 6 / Math.max(cropW, cropH);
+  const shapeW = cropW * scale;
+  const shapeH = cropH * scale;
+  const domainW = shapeW + 2 * FIELD_PAD_EM;
+  const domainH = shapeH + 2 * FIELD_PAD_EM;
+  const pxPerEm = Math.min(SDF_PX_PER_EM, Math.sqrt(MAX_FIELD_PIXELS / (domainW * domainH)), (maxSide - 2) / Math.max(domainW, domainH));
+  const width = Math.ceil(domainW * pxPerEm);
+  const height = Math.ceil(domainH * pxPerEm);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('Canvas 2D is unavailable.');
+  ctx.drawImage(sample, x0, y0, cropW, cropH, FIELD_PAD_EM * pxPerEm, FIELD_PAD_EM * pxPerEm, shapeW * pxPerEm, shapeH * pxPerEm);
+  const { alpha, box } = readAlpha(ctx, width, height);
+  if (!box) throw new Error('This logo is too thin to render. Try a thicker shape.');
+  const glyphSdf = [classField(alpha, width, height, box, Math.ceil(CLASS_MARGIN_EM * pxPerEm)), null, null, null];
+  const originEm = [-shapeW / 2 - FIELD_PAD_EM, -shapeH / 2 - FIELD_PAD_EM];
+  return {
+    empty: false,
+    isLogo: true,
+    layout: { rows: [{ baseline: shapeH / 2 }], capHeight: shapeH, gap: shapeH },
+    inkBox: inkBoxEm(box, originEm, pxPerEm),
+    glyphSdf,
+    sil: silhouetteField(unionField(glyphSdf, width, height), width, height, pxPerEm),
+    width, height, pxPerEm, originEm,
+    sizeEm: [width / pxPerEm, height / pxPerEm],
+  };
+}
+
 /**
  * Canvas box (em) around tagline lines: per-line ink metrics (em, baseline-relative, as
  * measureText reports them) with baselines `lineGap` apart, plus `pad` all round.
@@ -1617,10 +1635,10 @@ void main() {
   outColor = vec4(0.5 + 0.2 * w, 0.5 + 0.5 * clamp(swell, -1.0, 1.0), 0.5 + 0.5 * clamp(wobble, -1.0, 1.0));
 }`;
 
-// Pass 2: every design maps the pixel to one or two "layers" — a position in the sticker
+// Pass 2: every design maps the pixel to a layer — a position in the sticker
 // field (q), a position in the tagline field (tq), a stretch row, a background strip and
 // a colourway — then samples the fields through the warp, stretch and italic shear.
-// uOutput 1/2 writes raw layer coverages for the SVG tracer instead of colour.
+// uOutput 1 writes raw layer coverages for the SVG tracer instead of colour.
 const MAIN_FRAG_SRC = `#version 300 es
 precision highp float;
 uniform sampler2D uField;      // RGBA: letter-class SDFs, row parity × letter parity (em)
@@ -1648,20 +1666,19 @@ uniform float uWeight;
 uniform float uPad;
 uniform float uStroke;
 uniform float uGooK;           // smooth-union radius that melts letters within a word (em)
-uniform float uGooRowK;        // gentler radius between rows and ring repeats (em)
+uniform float uGooRowK;        // gentler radius between rows (em)
 uniform float uSticker;        // 1 draws the silhouette and outer stroke
 uniform float uStretchOn;
 uniform vec2 uStretchDomain;   // x0, width (em)
 uniform vec2 uRowGeom;         // first lockup row centre y, row gap (em)
-uniform int uMode;             // 0 sticker, 1 marquee, 2 badge, 3 ribbon, 4 wallpaper
-uniform int uOutput;           // 0 colour, 1 coverage (glyph, body, edge, tag), 2 strip
+uniform int uMode;             // 0 sticker, 1 marquee, 2 wallpaper, 3 oval
+uniform vec4 uOval;            // centre xy, radii xy in the text's field coordinates
+uniform float uOvalRing;
+uniform int uOutput;           // 0 colour, 1 coverage (glyph, body, edge, tag)
 uniform int uSelect;           // -1 every colourway, else only this one (SVG tracing)
-uniform vec2 uFocus;           // badge / wallpaper centre (em)
+uniform vec2 uFocus;           // wallpaper centre (em)
 uniform vec4 uBandGeom;        // band height, period, tagline slot x, scroll (em)
-uniform vec4 uSlotMap;         // sticker field x0, sticker centre y, tagline field x0|centre x, centre y
-uniform vec4 uBadge;           // radius, repeats, rotation (em along the ring), period
-uniform vec4 uRibbon0;         // centre y, amplitude, wavenumber, phase
-uniform vec4 uRibbon1;
+uniform vec4 uSlotMap;         // sticker field x0, sticker centre y, tagline field x0, centre y
 uniform vec4 uTile;            // tile width, height, angle, scroll
 uniform vec2 uTileOrigin;      // sticker field position of a tile's corner (em)
 uniform vec3 uBg;              // stage colour
@@ -1691,7 +1708,6 @@ struct Layer {
   float pivot;  // italic pivot line (field y)
   float strip;  // coverage of the layer's own background strip
   int group;    // colourway 0..2
-  float wrap;   // > 0: repeat period whose neighbouring copies merge (badge ring)
 };
 
 // The cap keeps derivative spikes at wrap seams from smearing faint lines.
@@ -1794,7 +1810,7 @@ float glyphAt(vec2 w, float row, float pivot, float t) {
 }
 
 Layer stickerLayer(vec2 p) {
-  return Layer(p, vec2(-1.0e4), LOCKUP, 0.0, 0.0, 0, 0.0);
+  return Layer(p, vec2(-1.0e4), LOCKUP, 0.0, 0.0, 0);
 }
 
 Layer bandLayer(vec2 p) {
@@ -1803,27 +1819,7 @@ Layer bandLayer(vec2 p) {
   float dir = mod(band, 2.0) < 0.5 ? 1.0 : -1.0;
   float xl = mod(p.x + dir * uBandGeom.w + fract(band * 0.618034) * uBandGeom.y, uBandGeom.y);
   return Layer(vec2(uSlotMap.x + xl, uSlotMap.y + yl), vec2(uSlotMap.z + xl - uBandGeom.z, uSlotMap.w + yl),
-               band, uSlotMap.y, uBgAlpha, int(mod(band, 3.0)), 0.0);
-}
-
-// Text runs clockwise round the ring, letter tops pointing outward; the tagline sits inside.
-Layer badgeLayer(vec2 p) {
-  vec2 v = p - uFocus;
-  float s = (atan(v.y, v.x) + 3.14159265) * uBadge.x + uBadge.z;
-  float xl = mod(s, uBadge.w);
-  float rep = mod(floor(s / uBadge.w), uBadge.y);
-  return Layer(vec2(uSlotMap.x + xl, uSlotMap.y - (length(v) - uBadge.x)), uSlotMap.zw + v, rep, uSlotMap.y, 0.0, 0, uBadge.w);
-}
-
-// A tape following a sine wave; distance to its centre line is measured along the normal.
-Layer ribbonLayer(vec2 p, vec4 wave, float dir, float index) {
-  float arg = wave.z * p.x + wave.w;
-  float slope = wave.y * wave.z * cos(arg);
-  float yl = (p.y - wave.x - wave.y * sin(arg)) / sqrt(1.0 + slope * slope);
-  float xl = mod(p.x + dir * uBandGeom.w + index * 0.37 * uBandGeom.y, uBandGeom.y);
-  float strip = cover(abs(yl) - uBandGeom.x * 0.5);
-  return Layer(vec2(uSlotMap.x + xl, uSlotMap.y + yl), vec2(uSlotMap.z + xl - uBandGeom.z, uSlotMap.w + yl),
-               index, uSlotMap.y, strip, int(index), 0.0);
+               band, uSlotMap.y, uBgAlpha, int(mod(band, 3.0)));
 }
 
 // Tilted brick tiling; neighbouring tiles alternate colourways.
@@ -1837,7 +1833,7 @@ Layer tileLayer(vec2 p) {
   float x = pr.x + row * 0.5 * uTile.x + dir * uTile.w;
   float col = floor(x / uTile.x);
   vec2 local = vec2(x - col * uTile.x, pr.y - row * uTile.y);
-  return Layer(uTileOrigin + local, vec2(-1.0e4), LOCKUP, 0.0, 0.0, int(mod(row + col, 2.0)), 0.0);
+  return Layer(uTileOrigin + local, vec2(-1.0e4), LOCKUP, 0.0, 0.0, int(mod(row + col, 2.0)));
 }
 
 // Glyph distance (per-letter stretch + lean) and silhouette distance (stretch only) at w.
@@ -1848,18 +1844,26 @@ vec2 fieldAt(vec2 w, float row, float pivot, float t) {
 }
 
 // Coverage of glyph, silhouette body, outer stroke edge and tagline for one layer.
+float ellipseDistance(vec2 p, vec2 radii) {
+  float k0 = length(p / radii);
+  if (k0 < 1.0e-5) return -min(radii.x, radii.y);
+  float k1 = length(p / (radii * radii));
+  return k0 * (k0 - 1.0) / max(k1, 1.0e-5);
+}
+
 vec4 coverages(Layer L, vec2 offset, float swellN, float wobble) {
   vec2 w = L.q + offset;
   float t = uWeight + swellN * uSwell;
   vec2 d = fieldAt(w, L.row, L.pivot, t);
-  if (L.wrap > 0.0) {
-    // Union with the neighbouring repeats: bodies merge into one ring, letters melt across.
-    float n = float(textureSize(uStretch, 0).y);
-    vec2 before = fieldAt(w + vec2(L.wrap, 0.0), mod(L.row - 1.0 + n, n), L.pivot, t);
-    vec2 after = fieldAt(w - vec2(L.wrap, 0.0), mod(L.row + 1.0, n), L.pivot, t);
-    d = vec2(smin(smin(d.x, before.x, uGooRowK, 1.0), after.x, uGooRowK, 1.0), min(d.y, min(before.y, after.y)));
+  float ink = d.r - t;
+  if (uMode == 3) {
+    float oval = ellipseDistance(w - uOval.xy, uOval.zw);
+    float thickness = uOvalRing * (1.0 + 0.15 * swellN * uSwellAmt);
+    float ring = abs(oval + thickness * 0.5) - thickness * 0.5;
+    ink = smin(ink, ring, uGooK, 1.0);
+    d.g = oval;
   }
-  float glyph = cover(d.r - t);
+  float glyph = cover(ink);
   float body = uSticker * cover(d.g - uPad - wobble);
   float edge = uSticker * cover(d.g - uPad - wobble - uStroke * (1.0 + 0.4 * swellN * uSwellAmt));
   float tag = cover(texture(uTag, (L.tq - uTagOrigin) / uTagSize).r);
@@ -1878,34 +1882,27 @@ vec4 paint(vec4 base, vec4 c, float strip, int k) {
   return over(base, uPalTag[k], c.w);
 }
 
-// Maps a point to its design's layers and their coverages.
-void evaluate(vec2 p, out Layer a, out Layer b, out vec4 ca, out vec4 cb) {
+// Maps a point to its design's layer and coverage.
+void evaluate(vec2 p, out Layer a, out vec4 ca) {
   vec4 w = texture(uWarp, (p - uWarpOrigin) / uWarpSize);
   vec2 offset = (w.xy - 0.5) / 0.2 * uAmp;
   float swellN = w.z * 2.0 - 1.0;
   float wobble = (w.w * 2.0 - 1.0) * uWobble;
-  b = stickerLayer(p);
   if (uMode == 1) a = bandLayer(p);
-  else if (uMode == 2) a = badgeLayer(p);
-  else if (uMode == 3) {
-    a = ribbonLayer(p, uRibbon0, 1.0, 0.0);
-    b = ribbonLayer(p, uRibbon1, -1.0, 1.0);
-  } else if (uMode == 4) a = tileLayer(p);
+  else if (uMode == 2) a = tileLayer(p);
   else a = stickerLayer(p);
   ca = coverages(a, offset, swellN, wobble);
-  cb = uMode == 3 ? coverages(b, offset, swellN, wobble) : vec4(0.0);
 }
 
 // Composited (premultiplied) colour of the design at p, before texture effects.
 vec4 shade(vec2 p) {
   Layer a;
-  Layer b;
+
   vec4 ca;
-  vec4 cb;
-  evaluate(p, a, b, ca, cb);
+
+  evaluate(p, a, ca);
   vec4 col = vec4(uBg * uBgAlpha, uBgAlpha);
   col = paint(col, ca, a.strip, a.group);
-  if (uMode == 3) col = paint(col, cb, b.strip, b.group);
   return col;
 }
 
@@ -1957,13 +1954,12 @@ void main() {
 
   if (uOutput > 0) {
     Layer a;
-    Layer b;
+
     vec4 ca;
-    vec4 cb;
-    evaluate(p, a, b, ca, cb);
+
+    evaluate(p, a, ca);
     vec4 m = vec4(0.0);
-    if (uSelect < 0 || a.group == uSelect) m = max(m, uOutput == 1 ? ca : vec4(a.strip, 0.0, 0.0, 0.0));
-    if (uMode == 3 && (uSelect < 0 || b.group == uSelect)) m = max(m, uOutput == 1 ? cb : vec4(b.strip, 0.0, 0.0, 0.0));
+    if (uSelect < 0 || a.group == uSelect) m = ca;
     outColor = m;
     return;
   }
@@ -2050,6 +2046,10 @@ const ZERO4 = [0, 0, 0, 0];
 
 // Stand-in tagline field: one texel "far away" from any ink.
 const NO_TAG = Object.freeze({ width: 1, height: 1, originEm: [0, 0], sizeEm: [1, 1], data: new Float32Array([1000]) });
+const EMPTY_OVAL_FIELD = Object.freeze({
+  width: 1, height: 1, originEm: [-1, -1], sizeEm: [2, 2], body: { width: 1, height: 1 },
+  data: { glyphs: new Float32Array(4).fill(FIELD_LIMIT_EM), body: new Float32Array([FIELD_LIMIT_EM]) },
+});
 
 function createTexture(gl, filter) {
   const tex = gl.createTexture();
@@ -2223,14 +2223,13 @@ function createRenderer(canvas) {
     gl.uniform3fv(u('uBg'), frame.stage);
     PALETTE_UNIFORMS.forEach(([key, name]) => gl.uniform3fv(u(name), frame.palettes[key]));
     gl.uniform1i(u('uMode'), frame.mode);
+    gl.uniform4fv(u('uOval'), frame.oval ?? [0, 0, 1, 1]);
+    gl.uniform1f(u('uOvalRing'), frame.ovalRing ?? 0.16);
     gl.uniform1i(u('uOutput'), frame.output ?? 0);
     gl.uniform1i(u('uSelect'), frame.select ?? -1);
     gl.uniform2fv(u('uFocus'), frame.focus ?? [0, 0]);
     gl.uniform4fv(u('uBandGeom'), frame.band ?? [1, 1, 0, 0]);
     gl.uniform4fv(u('uSlotMap'), frame.slot ?? ZERO4);
-    gl.uniform4fv(u('uBadge'), frame.badge ?? [1, 1, 0, 1]);
-    gl.uniform4fv(u('uRibbon0'), frame.ribbons?.[0] ?? ZERO4);
-    gl.uniform4fv(u('uRibbon1'), frame.ribbons?.[1] ?? ZERO4);
     gl.uniform4fv(u('uTile'), frame.tile ?? [1, 1, 0, 0]);
     gl.uniform2fv(u('uTileOrigin'), frame.tileOrigin ?? [0, 0]);
     gl.uniform1f(u('uBgAlpha'), frame.bgAlpha);
@@ -2397,7 +2396,7 @@ function exportFraming(live, clock, { scope, line, repeats, maxSide, wholeScale 
     };
   }
   if (p.design === 'sticker') return fitBox(expandBox(stickerBounds(scene.inkBox, p), 0.08));
-  if (p.design === 'badge') return fitBox(L.bounds);
+  if (p.design === 'oval') return fitBox(expandBox(L.bounds, 0.08));
   const scale = Math.min(wholeScale, maxSide / Math.max(stage.width, stage.height));
   return {
     width: size(stage.width * scale),
@@ -2408,7 +2407,7 @@ function exportFraming(live, clock, { scope, line, repeats, maxSide, wholeScale 
 
 /**
  * Traces a rendered export frame into an editable SVG: per colourway, the shader's
- * coverage masks (tape strip, outer stroke, silhouette, letters, tagline) become
+ * coverage masks (outer stroke, silhouette, letters, tagline) become
  * even-odd paths in named groups, painted back to front like the raster version.
  */
 function traceSvg(renderer, frame, live, framing) {
@@ -2427,12 +2426,11 @@ function traceSvg(renderer, frame, live, framing) {
     };
   };
   const trace = (values) => loopsToPath(traceContours(values, W, H).map((l) => simplifyLoop(l, SVG_EPSILON_PX)));
-  const groupLayers = (k, prefix, { strip = false, rects = null } = {}) => {
+  const groupLayers = (k, prefix, { rects = null } = {}) => {
     const pal = L.colours[k];
     const ch = masks(k, 1);
     return [
       ...(rects && !transparent ? [{ id: `${prefix}band`, color: pal.bg, rects }] : []),
-      ...(strip ? [{ id: `${prefix}tape`, color: pal.bg, d: trace(masks(k, 2)(0)) }] : []),
       { id: `${prefix}stroke`, color: pal.line, d: trace(ch(2)) },
       { id: `${prefix}silhouette`, color: pal.sil, d: trace(ch(1)) },
       { id: `${prefix}letters`, color: pal.fill, d: trace(ch(0)) },
@@ -2453,8 +2451,6 @@ function traceSvg(renderer, frame, live, framing) {
         .map((b) => ({ x: 0, y: (b * L.band.bandH - centerEm[1]) * pxPerEm, width: W, height: bandPx }));
     const groups = framing.line ? [live.params.exportLine] : [0, 1, 2];
     layers = groups.flatMap((k) => groupLayers(k, groups.length > 1 ? `band-${k + 1}-` : '', { rects: rectsFor(k) }));
-  } else if (frame.mode === MODE_INDEX.ribbon) {
-    layers = [0, 1].flatMap((k) => groupLayers(k, `tape-${k + 1}-`, { strip: true }));
   } else if (frame.mode === MODE_INDEX.wallpaper) {
     layers = [0, 1].flatMap((k) => groupLayers(k, `tile-${k ? 'b' : 'a'}-`));
   } else {
@@ -2527,7 +2523,7 @@ const currentDpr = () => clamp(window.devicePixelRatio || 1, 1, 2);
  * `cache` keeps both buffers between frames.
  */
 function computeStretchFrame(scene, params, time, rowCount, cache) {
-  if (!scene || scene.empty || !(params.stretch > 0 || params.italic > 0)) return null;
+  if (!scene || scene.empty || scene.isLogo || !(params.stretch > 0 || params.italic > 0)) return null;
   const rows = DESIGN_INFO[params.design]?.line
     ? Array.from({ length: rowCount }, (_, b) => ({ row: scene.layout.rows[0], seed: b + 1 }))
     : scene.layout.rows.map((row, i) => ({ row, seed: i + 1 }));
@@ -2591,12 +2587,9 @@ function frameFromLive(live, clock, stretch) {
     warpDomain: L?.warpDomain ?? null,
     stretch: stretch && { domain: stretch.domain, rowGeom: live.rowGeom },
     focus: L?.focus,
+    oval: L?.oval,
+    ovalRing: p.ovalRing,
     ...(L?.band && { band: [L.band.bandH, L.band.period, L.band.tagSlotX, scroll % L.band.period], slot: L.band.slot }),
-    ...(L?.badge && {
-      badge: [L.badge.radius, L.badge.repeats, scroll % (L.badge.repeats * L.badge.period), L.badge.period],
-      slot: L.badge.slot,
-    }),
-    ...(L?.ribbons && { ribbons: L.ribbons.map((r, i) => [r.cy, r.amp, r.k, r.phase + clock.shown * (i ? -0.21 : 0.27)]) }),
     ...(L?.tile && { tile: [L.tile.width, L.tile.height, TILE_ANGLE, scroll % (2 * L.tile.width)], tileOrigin: L.tile.origin }),
   };
 }
@@ -2653,8 +2646,8 @@ const STYLES = `
 
 const focusRing = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#ffc8f8]/70';
 
-function Section({ icon: Icon, title, children }) {
-  const [open, setOpen] = useState(true);
+function Section({ icon: Icon, title, children, defaultOpen = true }) {
+  const [open, setOpen] = useState(defaultOpen);
   const bodyId = useId();
   return (
     <section className="border-t border-white/[0.06] first:border-t-0">
@@ -2666,13 +2659,30 @@ function Section({ icon: Icon, title, children }) {
         className={`flex w-full items-center gap-2.5 px-4 py-3 text-left hover:bg-white/[0.02] ${focusRing}`}
       >
         <Icon size={14} className="text-[#ffc8f8]" aria-hidden />
-        <span className="flex-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-white/60">{title}</span>
+        <span className="flex-1 text-[13px] font-semibold text-white/85">{title}</span>
         <ChevronDown size={14} className={`text-white/35 transition-transform ${open ? '' : '-rotate-90'}`} aria-hidden />
       </button>
       <div id={bodyId} hidden={!open} className="space-y-3.5 px-4 pb-4">
         {children}
       </div>
     </section>
+  );
+}
+
+function PanelPage({ name, active, panelId, children }) {
+  return (
+    <div role="tabpanel" id={`${panelId}-${name}`} aria-labelledby={`${panelId}-tab-${name}`} hidden={active !== name} tabIndex={0} className={focusRing}>
+      {children}
+    </div>
+  );
+}
+
+function Advanced({ title, children }) {
+  return (
+    <details className="rsw-advanced rounded-xl border border-white/10 bg-white/[0.02]">
+      <summary className={`cursor-pointer rounded-xl px-3 py-3 text-[12px] font-medium text-white/70 hover:text-white ${focusRing}`}>{title}</summary>
+      <div className="space-y-3.5 px-3 pb-3">{children}</div>
+    </details>
   );
 }
 
@@ -2907,6 +2917,9 @@ export default function RetroStickerWarp({
   className = '',
 }) {
   const [text, setText] = useState(() => sanitizeInput(initialText));
+  const [uploadedLogo, setLogo] = useState(null);
+  const [logoLoading, setLogoLoading] = useState(false);
+  const [logoError, setLogoError] = useState('');
   const [tagline, setTagline] = useState(() => sanitizeTagline(initialTagline));
   const [params, setParams] = useState(() => sanitizeParams(initialSettings));
   const [uploadedFonts, setUploadedFonts] = useState([]);
@@ -2915,6 +2928,8 @@ export default function RetroStickerWarp({
   const [dropActive, setDropActive] = useState(false);
   const [playing, setPlaying] = useState(() => !prefersReducedMotion());
   const [panelPref, setPanelPref] = useState(null); // null → follow the stage width until toggled
+  const [panelTab, setPanelTab] = useState('Content');
+  const panelId = useId();
   const [stage, setStage] = useState({ width: 0, height: 0 });
   const [panelRect, setPanelRect] = useState(null);
   const [scene, setScene] = useState(null);
@@ -2930,11 +2945,14 @@ export default function RetroStickerWarp({
   const stageRef = useRef(null);
   const canvasRef = useRef(null);
   const panelRef = useRef(null);
+  const panelScrollRef = useRef(null);
   const panelToggleRef = useRef(null);
   const panelCloseRef = useRef(null);
   const focusAfterPanelRef = useRef(null); // 'panel' | 'text' | 'toggle' — focus target after toggling
   const typeRef = useRef(null);
   const panelTextRef = useRef(null);
+  const logoInputRef = useRef(null);
+  const logoRequestRef = useRef(0);
   const caretRequestRef = useRef(null);
   const caretElRef = useRef(null);
   const selectionLayerRef = useRef(null);
@@ -2952,9 +2970,12 @@ export default function RetroStickerWarp({
   const uploadedFontsRef = useRef(uploadedFonts);
 
   const { design } = params;
+  // Oval is an editable text layout; keep an uploaded logo available for the other layouts.
+  const logo = design === 'oval' ? null : uploadedLogo;
   const oneLine = DESIGN_INFO[design].line; // the lockup set on one line, with a tagline
-  const isSticker = design === 'sticker'; // the only design you type on directly
-  const bandLike = design === 'bands' || design === 'ribbon'; // band themes + single-line export
+  const isSticker = design === 'sticker' || design === 'oval'; // layouts with direct text editing
+  const canTypeOnStage = isSticker && !logo;
+  const bandLike = design === 'bands'; // band themes + single-line export
   const panelOpen = panelPref ?? stage.width >= PANEL_AUTO_OPEN_WIDTH;
   const lines = useMemo(() => displayLines(text, params.caps), [text, params.caps]);
   const fieldLines = useMemo(() => (oneLine ? [bandLine(lines)] : lines), [oneLine, lines]);
@@ -3118,30 +3139,30 @@ export default function RetroStickerWarp({
   // Rebuild the distance field when text or type settings change (coalesced per frame).
   useEffect(() => {
     const renderer = rendererRef.current;
-    if (!renderer || !fontState.family) return undefined;
+    if (!renderer || (!logo && !fontState.family)) return undefined;
     const handle = requestAnimationFrame(() => {
       try {
         const settings = [params.lineSpacing, params.tracking, params.align];
-        const key = JSON.stringify([fieldLines, fontState, settings, renderer.maxSize, glyphEpoch]);
+        const key = logo ? `logo:${logo.id}:${renderer.maxSize}` : JSON.stringify([fieldLines, fontState, settings, renderer.maxSize, glyphEpoch]);
         if (baseRef.current?.key !== key) {
           rasterRef.current ??= document.createElement('canvas');
           baseRef.current = {
             key,
-            ...rasterizeSticker(rasterRef.current, {
+            ...(logo ? (logo.maxSide === renderer.maxSize ? logo.base : rasterizeLogo(logo, renderer.maxSize)) : rasterizeSticker(rasterRef.current, {
               lines: fieldLines,
               family: fontState.family,
               lineSpacing: params.lineSpacing,
               tracking: params.tracking,
               align: params.align,
               maxSide: renderer.maxSize,
-            }),
+            })),
           };
-          if (fontState.loaded) requestMissingGlyphs(fontState.family, fieldLines.join(''));
+          if (!logo && fontState.loaded) requestMissingGlyphs(fontState.family, fieldLines.join(''));
         }
         const base = baseRef.current;
         renderer.setField(
           base.empty
-            ? null
+            ? (design === 'oval' ? EMPTY_OVAL_FIELD : null)
             : {
                 width: base.width,
                 height: base.height,
@@ -3155,17 +3176,20 @@ export default function RetroStickerWarp({
           layout: base.layout,
           inkBox: base.inkBox,
           empty: base.empty,
+          isLogo: Boolean(base.isLogo),
           fieldOrigin: base.originEm,
           fieldSize: base.sizeEm,
         });
         dirtyRef.current = true;
       } catch (err) {
         console.error('[RetroStickerWarp] failed to build the sticker', err);
-        notify('error', 'Could not build the sticker for this text.');
+        notify('error', 'Could not build the artwork. Try a simpler shape or shorter text.');
       }
     });
     return () => cancelAnimationFrame(handle);
   }, [
+    design,
+    logo,
     fieldLines,
     fontState,
     params.lineSpacing,
@@ -3206,14 +3230,14 @@ export default function RetroStickerWarp({
 
   // Caret and selection in em; the render loop slides them along with the stretched letters.
   const caretEm = useMemo(() => {
-    if (!isSticker || !typing || !scene || selection.start !== selection.end) return null;
+    if (!canTypeOnStage || !typing || !scene || scene.isLogo || selection.start !== selection.end) return null;
     const { row, col } = caretToRowCol(text, selection.end);
     const g = caretGeometry(scene.layout, row, col);
     return g && { row: Math.min(row, scene.layout.rows.length - 1), ...g };
-  }, [isSticker, typing, scene, selection, text]);
+  }, [canTypeOnStage, typing, scene, selection, text]);
 
   const selectionEm = useMemo(() => {
-    if (!isSticker || !typing || !scene || selection.start === selection.end) return [];
+    if (!canTypeOnStage || !typing || !scene || scene.isLogo || selection.start === selection.end) return [];
     const firstRow = caretToRowCol(text, Math.min(selection.start, selection.end)).row;
     return selectionRects(scene.layout, text, selection.start, selection.end).map((r, i) => ({
       row: firstRow + i,
@@ -3222,7 +3246,7 @@ export default function RetroStickerWarp({
       top: r.top,
       bottom: r.bottom,
     }));
-  }, [isSticker, typing, scene, selection, text]);
+  }, [canTypeOnStage, typing, scene, selection, text]);
 
   // Hand the latest state to the render loop without restarting it.
   useEffect(() => {
@@ -3342,7 +3366,23 @@ export default function RetroStickerWarp({
 
   const focusTyping = useCallback(
     (index) => {
+      if (logo) {
+        if (panelOpen && panelTab === 'Content') {
+          logoInputRef.current?.focus();
+          return;
+        }
+        focusAfterPanelRef.current = 'logo';
+        setPanelTab('Content');
+        setPanelPref(true);
+        return;
+      }
       // Only the single sticker is typed on directly; the other designs edit in the panel.
+      if (!isSticker && (!panelOpen || panelTab !== 'Content')) {
+        focusAfterPanelRef.current = 'text';
+        setPanelTab('Content');
+        setPanelPref(true);
+        return;
+      }
       const ta = isSticker ? typeRef.current : panelTextRef.current;
       if (!ta) {
         if (!isSticker) {
@@ -3356,7 +3396,7 @@ export default function RetroStickerWarp({
       ta.setSelectionRange(pos, pos);
       syncSelection();
     },
-    [isSticker, syncSelection],
+    [logo, isSticker, panelOpen, panelTab, syncSelection],
   );
 
   const placeCaret = useCallback(
@@ -3365,7 +3405,7 @@ export default function RetroStickerWarp({
       const stageEl = stageRef.current;
       if (!ta || !stageEl) return;
       ta.focus({ preventScroll: true });
-      if (scene && view && !scene.empty) {
+      if (scene && view && !scene.empty && !scene.isLogo) {
         const rect = stageEl.getBoundingClientRect();
         const [x, y] = cssToEm(view, [event.clientX - rect.left, event.clientY - rect.top]);
         // Undo the current stretch so the click lands on the glyph it visually hit.
@@ -3400,6 +3440,45 @@ export default function RetroStickerWarp({
   );
 
   /* ── Fonts, design ── */
+
+  useEffect(() => () => { logoRequestRef.current += 1; }, []);
+
+  const onLogoFiles = useCallback(async (files) => {
+    const file = files?.[0];
+    if (!file) return;
+    const request = ++logoRequestRef.current;
+    setLogoLoading(true);
+    setLogoError('');
+    try {
+      const asset = await loadSvgLogo(file);
+      if (request !== logoRequestRef.current) return;
+      const maxSide = rendererRef.current?.maxSize ?? 2048;
+      const base = rasterizeLogo(asset, maxSide);
+      setLogo({ ...asset, id: request, base, maxSide });
+      setParams((prev) => prev.design === 'oval' ? sanitizeParams({ ...prev, ...DESIGN_LOOKS.sticker, design: 'sticker' }) : prev);
+      setTyping(false);
+      setPanelTab('Content');
+      setPanelPref(true);
+      notify('success', 'SVG logo ready');
+    } catch (error) {
+      if (request === logoRequestRef.current) {
+        setLogoError(error instanceof Error ? error.message : 'Could not read this SVG logo.');
+        setPanelTab('Content');
+        setPanelPref(true);
+      }
+    } finally {
+      if (request === logoRequestRef.current) setLogoLoading(false);
+    }
+  }, [notify]);
+
+  const removeLogo = useCallback(() => {
+    logoRequestRef.current += 1;
+    setLogo(null);
+    setLogoLoading(false);
+    setLogoError('');
+    setTyping(false);
+    setPanelTab('Content');
+  }, []);
 
   // Uploads join one shared list; `target` is the setting the new face is applied to.
   const onFontFiles = useCallback(
@@ -3451,13 +3530,19 @@ export default function RetroStickerWarp({
       if (!event.dataTransfer?.files?.length) return;
       event.preventDefault();
       setDropActive(false);
-      onFontFiles(event.dataTransfer.files);
+      const files = event.dataTransfer.files;
+      if (/\.svg$/i.test(files[0].name)) onLogoFiles(files);
+      else onFontFiles(files);
     },
-    [onFontFiles],
+    [onFontFiles, onLogoFiles],
   );
 
   /** Switching design applies that design's recommended look (then everything is tweakable). */
   const setDesign = useCallback((design) => {
+    if (design === 'oval') {
+      logoRequestRef.current += 1;
+      setLogoLoading(false);
+    }
     setParams((prev) => (prev.design === design ? prev : sanitizeParams({ ...prev, ...DESIGN_LOOKS[design], design })));
   }, []);
 
@@ -3473,10 +3558,14 @@ export default function RetroStickerWarp({
     const target = focusAfterPanelRef.current;
     if (!target) return;
     focusAfterPanelRef.current = null;
-    const targets = { panel: panelCloseRef, text: panelTextRef, toggle: panelToggleRef };
+    const targets = { panel: panelCloseRef, text: panelTextRef, toggle: panelToggleRef, logo: logoInputRef };
     const el = targets[target].current ?? typeRef.current;
     el?.focus({ preventScroll: true });
-  }, [panelOpen]);
+  }, [panelOpen, panelTab]);
+
+  useLayoutEffect(() => {
+    if (panelScrollRef.current) panelScrollRef.current.scrollTop = 0;
+  }, [panelTab]);
 
   /* ── Actions ── */
 
@@ -3504,13 +3593,13 @@ export default function RetroStickerWarp({
   const exportScope = bandLike ? params.exportScope : 'whole';
   const exportBase = useCallback(
     (suffix = '') => {
-      const parts = [fileNameFor(lines).replace(/\.png$/, '')];
+      const parts = [fileNameFor(logo ? [logo.name.replace(/\.svg$/i, '')] : lines).replace(/\.png$/, '')];
       if (design !== 'sticker') parts.push(DESIGN_INFO[design].name.toLowerCase());
       if (exportScope === 'line') parts.push('line');
       if (suffix) parts.push(suffix);
       return parts.join('-');
     },
-    [lines, design, exportScope],
+    [logo, lines, design, exportScope],
   );
 
   /** Frames an export of the live design; `kind` is 'still', 'svg' or 'motion'. */
@@ -3518,7 +3607,7 @@ export default function RetroStickerWarp({
     const renderer = rendererRef.current;
     const live = liveRef.current;
     if (!renderer) throw new Error('The renderer is not ready yet.');
-    if (!live?.layout) throw new Error('Nothing to export yet — type something first.');
+    if (!live?.layout) throw new Error('Nothing to export yet — add text or an SVG logo first.');
     const p = live.params;
     const limit = { still: EXPORT_MAX_SIDE, svg: SVG_MAX_SIDE, motion: MOTION_MAX_SIDE }[kind];
     const framing = exportFraming(live, clockRef.current, {
@@ -3673,11 +3762,11 @@ export default function RetroStickerWarp({
   const showToolbar = !(panelOpen && panelRect && panelRect.x <= stage.width * 0.35);
   const bandTheme = BAND_THEMES.find((t) => t.id === params.bandTheme) ?? BAND_THEMES[0];
   const stageColor = design === 'bands' ? bandTheme.bands[0].bg : params.bg;
-  const reading = oneLine
+  const reading = logo ? `${logo.name}${oneLine ? ` — ${tagline.replace(/\n/g, ' ')}` : ''}` : oneLine
     ? `${bandLine(lines) || 'empty'} — ${tagline.replace(/\n/g, ' ')}`
     : lines.join(' ').trim() || 'empty';
   const canvasLabel = { sticker: 'Animated sticker', bands: 'Scrolling marquee' }[design] ?? `${designName} design`;
-  const hint = !isSticker
+  const hint = logo ? 'SVG logo · replace or remove it in Content' : !isSticker
     ? `${designName} — edit the text in the panel`
     : typing
       ? 'Typing — Enter adds a line · Esc to finish'
@@ -3702,7 +3791,7 @@ export default function RetroStickerWarp({
           role="img"
           aria-label={`${canvasLabel} reading: ${reading}`}
         />
-        {isSticker && (
+        {canTypeOnStage && (
           <textarea
             ref={typeRef}
             value={text}
@@ -3769,20 +3858,20 @@ export default function RetroStickerWarp({
           className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-dashed border-white/20 bg-black/40 px-5 py-3 text-center"
           style={{ left: centerX, top: free.y + free.height / 2 }}
         >
-          <p className="text-[15px] font-semibold text-white/80">Nothing here yet</p>
+          <p className="text-[15px] font-semibold text-white/80">{design === 'oval' ? 'Type inside your oval' : 'Nothing here yet'}</p>
           <p className="mt-0.5 text-[12px] text-white/60">
             {isSticker ? 'Click anywhere and start typing' : 'Type the text in the panel'}
           </p>
         </div>
       )}
 
-      {/* Font drop target */}
+      {/* Artwork and font drop target */}
       {dropActive && (
         <div className="pointer-events-none absolute inset-3 z-50 grid place-items-center rounded-3xl border-2 border-dashed border-[#ffc8f8] bg-black/70 backdrop-blur-sm">
           <div className="text-center">
             <FileUp size={28} className="mx-auto mb-2 text-[#ffc8f8]" aria-hidden />
-            <p className="text-[15px] font-semibold">Drop a font to use it</p>
-            <p className="mt-1 text-[12px] text-white/65">.ttf · .otf · .woff · .woff2</p>
+            <p className="text-[15px] font-semibold">Drop an SVG logo or font</p>
+            <p className="mt-1 text-[12px] text-white/65">.svg · .ttf · .otf · .woff · .woff2</p>
           </div>
         </div>
       )}
@@ -3813,10 +3902,10 @@ export default function RetroStickerWarp({
               <LayoutTemplate size={18} aria-hidden />
             </ToolButton>
             <ToolDivider />
-            <ToolButton label="Type on sticker" onClick={() => focusTyping()} className="hidden sm:grid">
+            <ToolButton label={logo ? "Change logo" : "Type on sticker"} onClick={() => focusTyping()} className="hidden sm:grid">
               <TextCursorInput size={18} aria-hidden />
             </ToolButton>
-            <ToolButton label="Clear text" onClick={clearText}>
+            <ToolButton label={logo ? "Remove logo" : "Clear text"} onClick={logo ? removeLogo : clearText}>
               <Eraser size={18} aria-hidden />
             </ToolButton>
             <ToolButton label="Shuffle colours" onClick={shufflePalette} className="hidden sm:grid">
@@ -3853,12 +3942,12 @@ export default function RetroStickerWarp({
         <aside
           ref={panelRef}
           aria-label="Sticker controls"
-          className="absolute inset-x-2 bottom-2 z-30 flex max-h-[62dvh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#0c0c0f]/90 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.95)] backdrop-blur-xl md:inset-x-auto md:bottom-4 md:right-4 md:top-4 md:max-h-none md:w-[340px]"
+          className="absolute inset-x-2 bottom-2 z-30 flex max-h-[62dvh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#0c0c0f]/90 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.95)] backdrop-blur-xl md:inset-x-auto md:bottom-4 md:right-4 md:top-4 md:max-h-none md:w-[360px]"
         >
           <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-3">
             <div className="flex items-center gap-2">
               <SlidersHorizontal size={15} className="text-[#ffc8f8]" aria-hidden />
-              <h2 className="text-[13px] font-semibold tracking-tight">Controls</h2>
+              <div><h2 className="text-[14px] font-semibold tracking-tight">Make it yours</h2><p className="mt-0.5 text-[11px] text-white/55">Type, tweak, and save. Changes are live.</p></div>
             </div>
             <button
               ref={panelCloseRef}
@@ -3871,13 +3960,34 @@ export default function RetroStickerWarp({
             </button>
           </div>
 
-          <div className="rsw-scroll flex-1 overflow-y-auto overscroll-contain">
-            <Section icon={LayoutTemplate} title="Design">
+          <div role="tablist" aria-label="Editing steps"
+            onKeyDown={(event) => {
+              if (event.key === 'Home' || event.key === 'End') {
+                event.preventDefault();
+                const next = event.key === 'Home' ? PANEL_TABS[0] : PANEL_TABS.at(-1);
+                setPanelTab(next);
+                event.currentTarget.querySelector(`[data-value="${next}"]`)?.focus();
+              } else onRadioGroupKeyDown(event, PANEL_TABS, panelTab, setPanelTab);
+            }}
+            className="grid shrink-0 grid-cols-4 gap-1 border-b border-white/10 bg-black/20 p-2">
+            {PANEL_TABS.map((name, index) => (
+              <button key={name} type="button" role="tab" aria-label={name} id={`${panelId}-tab-${name}`} aria-controls={`${panelId}-${name}`}
+                aria-selected={panelTab === name} tabIndex={panelTab === name ? 0 : -1} data-value={name}
+                onClick={() => setPanelTab(name)}
+                className={`rounded-lg px-1 py-2.5 text-[12px] font-medium transition-colors ${focusRing} ${panelTab === name ? 'bg-[#ffc8f8] text-[#20101d]' : 'text-white/65 hover:bg-white/[0.06] hover:text-white'}`}>
+                <span className="mr-1 opacity-55">{index + 1}</span>{name}
+              </button>
+            ))}
+          </div>
+
+          <div ref={panelScrollRef} className="rsw-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain">
+            <PanelPage name="Content" active={panelTab} panelId={panelId}>
+            <Section icon={LayoutTemplate} title="Choose a layout">
               <div
                 role="radiogroup"
                 aria-label="Design"
                 onKeyDown={(e) => onRadioGroupKeyDown(e, DESIGNS, design, setDesign)}
-                className="grid grid-cols-2 gap-1.5"
+                className="grid grid-cols-4 gap-1.5"
               >
                 {DESIGNS.map((id) => {
                   const active = id === design;
@@ -3891,7 +4001,7 @@ export default function RetroStickerWarp({
                       tabIndex={active ? 0 : -1}
                       data-value={id}
                       onClick={() => setDesign(id)}
-                      className={`flex items-center gap-2 rounded-xl border px-2.5 py-2 text-left text-[12px] font-medium transition-colors ${focusRing} ${
+                      className={`flex flex-col items-center gap-2 rounded-xl border px-1 py-3 text-left text-[12px] font-medium transition-colors ${focusRing} ${
                         active ? 'border-[#ffc8f8]/70 bg-[#ffc8f8]/10 text-white' : 'border-white/10 bg-white/[0.03] text-white/75 hover:bg-white/[0.07]'
                       }`}
                     >
@@ -3901,10 +4011,31 @@ export default function RetroStickerWarp({
                   );
                 })}
               </div>
-              <p className="text-[11px] leading-relaxed text-white/60">{DESIGN_INFO[design].blurb}</p>
+              <p className="text-[11px] leading-relaxed text-white/60">{logo ? 'Your logo uses this layout. Adjust its colours and motion in the next tabs.' : DESIGN_INFO[design].blurb}</p>
             </Section>
 
-            <Section icon={TextCursorInput} title="Text">
+            {design !== 'oval' && <Section icon={FileUp} title="Use your SVG logo">
+              <p className="text-[12px] leading-relaxed text-white/60">Upload a logo instead of text. Its shape uses your chosen colours and goo effect.</p>
+              <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-[#ffc8f8]/40 bg-[#ffc8f8]/5 px-3 py-3 text-[12px] font-medium text-[#ffc8f8] hover:bg-[#ffc8f8]/10 focus-within:ring-2 focus-within:ring-[#ffc8f8]/60">
+                {logoLoading ? <LoaderCircle size={16} className="animate-spin" aria-hidden /> : <FileUp size={16} aria-hidden />}
+                {logoLoading ? 'Loading SVG…' : logo ? 'Replace SVG logo' : 'Upload SVG logo'}
+                <input ref={logoInputRef} type="file" accept=".svg,image/svg+xml" aria-label="Upload SVG logo" className="sr-only"
+                  onChange={(event) => { onLogoFiles(event.target.files); event.target.value = ''; }} />
+              </label>
+              <p className="text-[11px] leading-relaxed text-white/55">SVG · up to 2 MB · transparent background recommended. Convert text to outlines before uploading.</p>
+              {logoError && <p role="alert" className="rounded-lg bg-red-400/10 p-2.5 text-[12px] leading-relaxed text-red-200">{logoError}</p>}
+              {logo && (
+                <div className="flex min-w-0 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                  <FileCode2 size={16} className="shrink-0 text-[#ffc8f8]" aria-hidden />
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-white/80" title={logo.name}>{logo.name}</span>
+                  <button type="button" onClick={removeLogo} className={`shrink-0 rounded-lg px-2 py-1.5 text-[12px] text-white/70 hover:bg-white/10 ${focusRing}`}>Use text instead</button>
+                </div>
+              )}
+              {logoLoading && <button type="button" onClick={() => { logoRequestRef.current += 1; setLogoLoading(false); }} className={`rounded-lg px-2 py-1 text-[12px] text-white/70 ${focusRing}`}>Cancel upload</button>}
+            </Section>}
+
+            <Section icon={TextCursorInput} title={logo ? "Logo settings" : "Write your message"}>
+              {!logo && (<>
               <textarea
                 ref={panelTextRef}
                 value={text}
@@ -3918,6 +4049,11 @@ export default function RetroStickerWarp({
                 className="block w-full resize-none rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[14px] font-semibold leading-snug tracking-wide text-white placeholder:font-normal placeholder:text-white/30 focus:border-[#ffc8f8]/60 focus:outline-none"
                 style={{ textTransform: params.caps ? 'uppercase' : 'none' }}
               />
+              <p className="flex justify-between gap-2 text-[11px] text-white/55">
+                <span>Enter adds a new line</span>
+                <span className="rsw-mono">{text.length}/{MAX_CHARS} · {text.split('\n').length}/{MAX_LINES} lines</span>
+              </p>
+              </>)}
               {oneLine && (
                 <div>
                   <label htmlFor="rsw-tagline" className="mb-1.5 block text-[12px] text-white/70">
@@ -3947,6 +4083,7 @@ export default function RetroStickerWarp({
                   </div>
                 </div>
               )}
+              {!logo && (
               <div className="flex items-center gap-2">
                 <Toggle label="All caps" checked={params.caps} onChange={(v) => update('caps', v)} />
                 <button
@@ -3957,9 +4094,10 @@ export default function RetroStickerWarp({
                   <Eraser size={13} aria-hidden /> Clear
                 </button>
               </div>
-              {!oneLine && (
+              )}
+              {!oneLine && !logo && (
                 <Segmented
-                  label="Lockup"
+                  label="Text alignment"
                   value={params.align}
                   onChange={(v) => update('align', v)}
                   options={[
@@ -3970,9 +4108,10 @@ export default function RetroStickerWarp({
                   ]}
                 />
               )}
+              <Slider label={logo ? "Logo size" : "Text size"} value={params.fontSize} range={RANGES.fontSize} format={fmt.px} onChange={(v) => update('fontSize', v)} />
             </Section>
 
-            <Section icon={Type} title="Type">
+            {!logo && <Section icon={Type} title="Advanced type" defaultOpen={false}>
               <FontPicker
                 label="Typeface"
                 uploadLabel="Upload a font file"
@@ -3982,48 +4121,100 @@ export default function RetroStickerWarp({
                 onFiles={(files) => onFontFiles(files, 'fontId')}
                 onRemove={removeFont}
               />
-              <Slider label="Size" value={params.fontSize} range={RANGES.fontSize} format={fmt.px} onChange={(v) => update('fontSize', v)} />
               {!oneLine && (
                 <Slider label="Line spacing" value={params.lineSpacing} range={RANGES.lineSpacing} format={fmt.times} onChange={(v) => update('lineSpacing', v)} />
               )}
-              <Slider label="Tracking" value={params.tracking} range={RANGES.tracking} format={fmt.em} onChange={(v) => update('tracking', v)} />
-              <Slider label="Weight" value={params.weight} range={RANGES.weight} format={fmt.em} onChange={(v) => update('weight', v)} />
+              <Slider label="Letter spacing" value={params.tracking} range={RANGES.tracking} format={fmt.em} onChange={(v) => update('tracking', v)} />
+              <Slider label="Letter thickness" value={params.weight} range={RANGES.weight} format={fmt.em} onChange={(v) => update('weight', v)} />
+            </Section>}
+            </PanelPage>
+            <PanelPage name="Style" active={panelTab} panelId={panelId}>
+            <Section icon={Palette} title="Colours">
+              {bandLike ? (
+                <div role="radiogroup" aria-label="Band theme" className="grid grid-cols-3 gap-1.5">
+                  {BAND_THEMES.map((theme) => {
+                    const active = theme.id === bandTheme.id;
+                    return (
+                      <button
+                        key={theme.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        onClick={() => update('bandTheme', theme.id)}
+                        className={`overflow-hidden rounded-xl border text-left transition-colors ${focusRing} ${
+                          active ? 'border-[#ffc8f8]/80' : 'border-white/10 hover:border-white/30'
+                        }`}
+                      >
+                        {theme.bands.map((band) => (
+                          <span key={band.bg} className="flex h-4 items-center px-2" style={{ background: band.bg }}>
+                            <span className="h-1.5 w-6 rounded-full" style={{ background: band.fill, boxShadow: `0 0 0 1.5px ${band.line}` }} />
+                          </span>
+                        ))}
+                        <span className="block px-2 py-1 text-[11px] text-white/75">{theme.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <>
+
+              <div className="flex flex-wrap gap-1.5">
+                {PALETTES.map((pal) => (
+                  <button
+                    key={pal.id}
+                    type="button"
+                    onClick={() => applyPalette(pal)}
+                    aria-pressed={activePalette === pal.id}
+                    className={`inline-flex items-center gap-1.5 rounded-full border py-1 pl-1 pr-2.5 text-[11px] transition-colors ${focusRing} ${
+                      activePalette === pal.id ? 'border-[#ffc8f8]/70 bg-[#ffc8f8]/10 text-white' : 'border-white/10 text-white/65 hover:bg-white/[0.06]'
+                    }`}
+                  >
+                    <span className="grid h-5 w-5 place-items-center rounded-full" style={{ background: pal.line }}>
+                      <span className="grid h-3.5 w-3.5 place-items-center rounded-full" style={{ background: pal.sil }}>
+                        <span className="h-1.5 w-1.5 rounded-full" style={{ background: pal.fill }} />
+                      </span>
+                    </span>
+                    {pal.name}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={shufflePalette}
+                  className={`inline-flex items-center gap-1.5 rounded-full border border-dashed border-white/20 px-2.5 py-1 text-[11px] text-white/65 hover:bg-white/[0.06] hover:text-white ${focusRing}`}
+                >
+                  <Dices size={13} aria-hidden /> Shuffle
+                </button>
+              </div>
+              <Advanced title="Custom colours">
+              <div className="grid grid-cols-2 gap-2">
+                <ColorField label={logo ? "Logo" : "Text"} value={params.fill} onChange={(v) => update('fill', v)} />
+                <ColorField label="Sticker" value={params.sil} onChange={(v) => update('sil', v)} />
+                <ColorField label="Stroke" value={params.line} onChange={(v) => update('line', v)} />
+                <ColorField label="Background" value={params.bg} onChange={(v) => update('bg', v)} />
+              </div>
+              </Advanced>
+                </>
+              )}
             </Section>
 
-            <Section icon={Waves} title="Warp">
-              <Slider label="Speed" value={params.speed} range={RANGES.speed} format={fmt.times} onChange={(v) => update('speed', v)} />
-              <Slider label="Intensity" value={params.intensity} range={RANGES.intensity} format={fmt.pct} onChange={(v) => update('intensity', v)} />
-              <Slider label="Frequency" value={params.frequency} range={RANGES.frequency} format={fmt.times} onChange={(v) => update('frequency', v)} />
-              <Slider label="Swell" value={params.swell} range={RANGES.swell} format={fmt.pct} onChange={(v) => update('swell', v)} />
-              <Slider label="Stretch" value={params.stretch} range={RANGES.stretch} format={fmt.pct} onChange={(v) => update('stretch', v)} />
-              <Slider label="Italic" value={params.italic} range={RANGES.italic} format={fmt.pct} onChange={(v) => update('italic', v)} />
-              {!isSticker && (
-                <Slider
-                  label={design === 'badge' ? 'Spin' : 'Scroll'}
-                  value={params.scroll}
-                  range={RANGES.scroll}
-                  format={fmt.times}
-                  onChange={(v) => update('scroll', v)}
-                />
-              )}
-              <Segmented
-                label="Motion"
-                value={params.boil ? 'boil' : 'smooth'}
-                onChange={(v) => update('boil', v === 'boil')}
-                options={[
-                  { value: 'smooth', label: 'Smooth 60' },
-                  { value: 'boil', label: 'Boil (stop-motion)' },
-                ]}
-              />
-              {params.boil && (
-                <Slider label="Boil frame rate" value={params.boilFps} range={RANGES.boilFps} format={fmt.fps} onChange={(v) => update('boilFps', v)} />
-              )}
-            </Section>
+            {design === 'oval' && <Section icon={Circle} title="Oval frame">
+              <Segmented label="Oval shape" value={params.ovalAspect} onChange={(v) => update('ovalAspect', v)} options={[
+                { value: 1.8, label: 'Tall' }, { value: 2.4, label: 'Classic' }, { value: 3.4, label: 'Wide' },
+              ]} />
+              <Slider label="Ring thickness" value={params.ovalRing} range={RANGES.ovalRing} format={fmt.emAbs} onChange={(v) => update('ovalRing', v)} />
+              <Slider label="Space around text" value={params.ovalPadding} range={RANGES.ovalPadding} format={fmt.emAbs} onChange={(v) => update('ovalPadding', v)} />
+              <p className="text-[11px] leading-relaxed text-white/55">The ring shares your text colour. Change the outer stroke below.</p>
+            </Section>}
 
-            <Section icon={Sticker} title="Sticker">
+            <Section icon={Sticker} title="Goo & outline">
+              <div className="space-y-1">
+                <Slider label="Goo" value={params.goo} range={RANGES.goo} format={fmt.pct} onChange={(v) => update('goo', v)} />
+                <p className="text-[11px] leading-relaxed text-white/55">{logo ? 'Round the edges and soften the logo’s outline.' : 'Melt neighbouring letters into soft bridges. Word spaces stay clear.'}</p>
+              </div>
+              <Advanced title="Outline settings">
               <Toggle label="Sticker body & outline" checked={params.sticker} onChange={(v) => update('sticker', v)} />
               <Slider
-                label="Silhouette"
+                label="Background padding"
                 value={params.pad}
                 range={RANGES.pad}
                 format={fmt.emAbs}
@@ -4038,13 +4229,11 @@ export default function RetroStickerWarp({
                 disabled={!params.sticker}
                 onChange={(v) => update('stroke', v)}
               />
-              <div className="space-y-1">
-                <Slider label="Goo" value={params.goo} range={RANGES.goo} format={fmt.pct} onChange={(v) => update('goo', v)} />
-                <p className="text-[11px] leading-relaxed text-white/55">Melt neighbouring letters into soft bridges. Word spaces stay clear.</p>
-              </div>
+
+              </Advanced>
             </Section>
 
-            <Section icon={Blend} title="Texture">
+            <Section icon={Blend} title="Print texture" defaultOpen={false}>
               <Slider label="Grain" value={params.grain} range={RANGES.grain} format={fmt.pct} onChange={(v) => update('grain', v)} />
               <Slider label="Halftone" value={params.halftone} range={RANGES.halftone} format={fmt.pct} onChange={(v) => update('halftone', v)} />
               <Slider
@@ -4074,73 +4263,58 @@ export default function RetroStickerWarp({
               />
               <p className="text-[11px] leading-relaxed text-white/60">Textures render into PNG and video exports; SVG stays clean vectors.</p>
             </Section>
-
-            <Section icon={Palette} title="Colours">
-              {bandLike ? (
-                <div role="radiogroup" aria-label="Band theme" className="grid grid-cols-3 gap-1.5">
-                  {BAND_THEMES.map((theme) => {
-                    const active = theme.id === bandTheme.id;
-                    return (
-                      <button
-                        key={theme.id}
-                        type="button"
-                        role="radio"
-                        aria-checked={active}
-                        onClick={() => update('bandTheme', theme.id)}
-                        className={`overflow-hidden rounded-xl border text-left transition-colors ${focusRing} ${
-                          active ? 'border-[#ffc8f8]/80' : 'border-white/10 hover:border-white/30'
-                        }`}
-                      >
-                        {theme.bands.map((band) => (
-                          <span key={band.bg} className="flex h-4 items-center px-2" style={{ background: band.bg }}>
-                            <span className="h-1.5 w-6 rounded-full" style={{ background: band.fill, boxShadow: `0 0 0 1.5px ${band.line}` }} />
-                          </span>
-                        ))}
-                        <span className="block px-2 py-1 text-[11px] text-white/75">{theme.name}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <>
-              <div className="grid grid-cols-2 gap-2">
-                <ColorField label="Text" value={params.fill} onChange={(v) => update('fill', v)} />
-                <ColorField label="Silhouette" value={params.sil} onChange={(v) => update('sil', v)} />
-                <ColorField label="Stroke" value={params.line} onChange={(v) => update('line', v)} />
-                <ColorField label="Stage" value={params.bg} onChange={(v) => update('bg', v)} />
+            </PanelPage>
+            <PanelPage name="Motion" active={panelTab} panelId={panelId}>
+            <Section icon={Waves} title="Bring it to life">
+              <p className="text-[12px] leading-relaxed text-white/60">Start with a preset, then adjust the speed and wobble.</p>
+              <div aria-label="Motion presets" className="grid grid-cols-3 gap-2">
+                {MOTION_PRESETS.map(({ name, settings }) => {
+                  const active = Object.entries(settings).every(([key, value]) => params[key] === value);
+                  return (
+                    <button key={name} type="button" aria-pressed={active}
+                      onClick={() => setParams((prev) => sanitizeParams({ ...prev, ...settings }))}
+                      className={`rounded-xl border px-2 py-3 text-[12px] font-medium transition-colors ${focusRing} ${active ? 'border-[#ffc8f8]/70 bg-[#ffc8f8]/10 text-white' : 'border-white/10 text-white/70 hover:bg-white/[0.06]'}`}>
+                      {name}
+                    </button>
+                  );
+                })}
               </div>
-              <div className="flex flex-wrap gap-1.5">
-                {PALETTES.map((pal) => (
-                  <button
-                    key={pal.id}
-                    type="button"
-                    onClick={() => applyPalette(pal)}
-                    aria-pressed={activePalette === pal.id}
-                    className={`inline-flex items-center gap-1.5 rounded-full border py-1 pl-1 pr-2.5 text-[11px] transition-colors ${focusRing} ${
-                      activePalette === pal.id ? 'border-[#ffc8f8]/70 bg-[#ffc8f8]/10 text-white' : 'border-white/10 text-white/65 hover:bg-white/[0.06]'
-                    }`}
-                  >
-                    <span className="grid h-5 w-5 place-items-center rounded-full" style={{ background: pal.line }}>
-                      <span className="grid h-3.5 w-3.5 place-items-center rounded-full" style={{ background: pal.sil }}>
-                        <span className="h-1.5 w-1.5 rounded-full" style={{ background: pal.fill }} />
-                      </span>
-                    </span>
-                    {pal.name}
-                  </button>
-                ))}
-                <button
-                  type="button"
-                  onClick={shufflePalette}
-                  className={`inline-flex items-center gap-1.5 rounded-full border border-dashed border-white/20 px-2.5 py-1 text-[11px] text-white/65 hover:bg-white/[0.06] hover:text-white ${focusRing}`}
-                >
-                  <Dices size={13} aria-hidden /> Shuffle
-                </button>
-              </div>
-                </>
+              {!playing && <p className="rounded-lg bg-[#ffc8f8]/10 px-3 py-2 text-[12px] text-[#ffc8f8]">Preview paused. Press Play below to see your changes.</p>}
+              <Slider label="Speed" value={params.speed} range={RANGES.speed} format={fmt.times} onChange={(v) => update('speed', v)} />
+              <Slider label="Wobble" value={params.intensity} range={RANGES.intensity} format={fmt.pct} onChange={(v) => update('intensity', v)} />
+              <Advanced title="Advanced motion">
+              {logo && <p className="text-[11px] leading-relaxed text-white/55">Logos move as one shape. Letter stretch and tilt apply to text only.</p>}
+              <Slider label="Wave detail" value={params.frequency} range={RANGES.frequency} format={fmt.times} onChange={(v) => update('frequency', v)} />
+              <Slider label="Breathing" value={params.swell} range={RANGES.swell} format={fmt.pct} onChange={(v) => update('swell', v)} />
+              <Slider label="Stretch" disabled={Boolean(logo)} value={params.stretch} range={RANGES.stretch} format={fmt.pct} onChange={(v) => update('stretch', v)} />
+              <Slider label="Letter tilt" disabled={Boolean(logo)} value={params.italic} range={RANGES.italic} format={fmt.pct} onChange={(v) => update('italic', v)} />
+              {!isSticker && (
+                <Slider
+                  label="Scroll"
+                  value={params.scroll}
+                  range={RANGES.scroll}
+                  format={fmt.times}
+                  onChange={(v) => update('scroll', v)}
+                />
               )}
+              <Segmented
+                label="Motion"
+                value={params.boil ? 'boil' : 'smooth'}
+                onChange={(v) => update('boil', v === 'boil')}
+                options={[
+                  { value: 'smooth', label: 'Smooth' },
+                  { value: 'boil', label: 'Stop motion' },
+                ]}
+              />
+              {params.boil && (
+                <Slider label="Boil frame rate" value={params.boilFps} range={RANGES.boilFps} format={fmt.fps} onChange={(v) => update('boilFps', v)} />
+              )}
+              </Advanced>
             </Section>
-
-            <Section icon={Download} title="Export">
+            </PanelPage>
+            <PanelPage name="Export" active={panelTab} panelId={panelId}>
+            <Section icon={Download} title="Save your creation">
+              <p className="text-[12px] leading-relaxed text-white/60">Choose PNG for an image you can share anywhere, or SVG to edit the shapes later.</p>
               {bandLike && (
                 <Segmented
                   label="Scope"
@@ -4187,7 +4361,7 @@ export default function RetroStickerWarp({
               )}
               <Toggle label="Transparent background" checked={params.transparent} onChange={(v) => update('transparent', v)} />
 
-              <p className="pt-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/50">Still</p>
+              <p className="pt-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/50">Save an image</p>
               <div className="grid grid-cols-3 gap-1.5">
                 <button
                   type="button"
@@ -4215,7 +4389,7 @@ export default function RetroStickerWarp({
                 </button>
               </div>
 
-              <p className="pt-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/50">Motion</p>
+              <Advanced title="Save an animation">
               <div className="grid grid-cols-2 gap-2">
                 <Segmented
                   label="Length"
@@ -4251,6 +4425,7 @@ export default function RetroStickerWarp({
               <p className="text-[11px] leading-relaxed text-white/55">
                 Video records in real time (MP4 or WebM, opaque). PNG sequences keep transparency for compositing.
               </p>
+              </Advanced>
               {job && (
                 <div className="rounded-xl border border-white/10 bg-black/30 p-3">
                   <div className="mb-2 flex items-center justify-between gap-2 text-[12px]">
@@ -4288,6 +4463,7 @@ export default function RetroStickerWarp({
                 </div>
               )}
             </Section>
+            </PanelPage>
           </div>
 
           <div className="flex gap-2 border-t border-white/[0.06] p-3">
@@ -4304,7 +4480,7 @@ export default function RetroStickerWarp({
               onClick={resetSettings}
               className={`inline-flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 py-2 text-[12px] text-white/75 hover:bg-white/[0.06] hover:text-white ${focusRing}`}
             >
-              <RotateCcw size={14} aria-hidden /> Reset
+              <RotateCcw size={14} aria-hidden /> Reset look
             </button>
           </div>
         </aside>
