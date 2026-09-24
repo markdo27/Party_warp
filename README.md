@@ -10,8 +10,9 @@ silhouette with a pink outline, warped live on the GPU. The default reads
 
 - **Live text.** Click the sticker and type. It re-flows and resizes as you go (up to six lines).
 - **Melting messages.** In Sticker → Content, enable **Melt between messages** to loop two
-  or three messages. Adjust the hold and melting times; small round drips carry the letters
-  downward as the next message gently forms, while the outline follows smoothly.
+  or three messages. Adjust the hold and melting times. Only what changes melts: letters the
+  messages share stay put (BLK → BLK46 keeps BLK still), the old letters drain away top to
+  bottom and the new ones pour in behind them, while the backing grows or shrinks to fit.
   Blank messages are skipped. Pause freezes the transition, and animation exports can include
   the full loop. This mode uses text, with per-letter stretch and tilt paused.
 - **SVG logos.** Upload or drop a static SVG (up to 2 MB) to use its shape with the editor’s

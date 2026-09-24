@@ -50,6 +50,9 @@ import {
   letterClass,
   loopsToPath,
   mapBreaks,
+  messageAlignment,
+  messagePlan,
+  messageTiming,
   motionClock,
   noise1,
   ovalGeometry,
@@ -414,6 +417,57 @@ describe('tagline typeface', () => {
     expect(originEm[1] + sizeEm[1]).toBeCloseTo(1.8, 9); // second baseline (1) + descent + pad
     // The second line's tall ascent reaches above its baseline but not above the canvas.
     expect(1 - 1.3).toBeGreaterThanOrEqual(originEm[1]);
+  });
+});
+
+describe('messageAlignment', () => {
+  // A one-row "base" with 1 em wide monospace letters, centred like the renderer centres it.
+  const base = (rows) => {
+    const laid = rows.map((text, i) => ({ x: 0, baseline: i * 1.2, chars: Array.from(text), carets: Array.from(text, (_, k) => k), width: text.length }));
+    const width = Math.max(...rows.map((t) => t.length));
+    return { layout: { rows: laid, capHeight: 0.7 }, inkBox: { x: 0, y: -0.7, width, height: 0.7 + (rows.length - 1) * 1.2 } };
+  };
+
+  it('keeps shared text still: BLK → BLK46 shifts the new message by half the added width', () => {
+    expect(messageAlignment(base(['BLK']), base(['BLK46']))).toEqual([1, 0]);
+    expect(messageAlignment(base(['BLK46']), base(['BLK']))).toEqual([-1, 0]);
+  });
+
+  it('aligns shared text found anywhere, including on another row', () => {
+    const [dx, dy] = messageAlignment(base(['LETS', 'DANCE']), base(['XDANCEX']));
+    // D: x 0 on row 2 of the old message (ink centre 2.5, 0.25), x 1 in the new (3.5, -0.35).
+    expect(dx).toBeCloseTo(0 - 2.5 - (1 - 3.5), 9);
+    expect(dy).toBeCloseTo(1.2 - 0.25 - (0 + 0.35), 9);
+  });
+
+  it('plans the melt: drain what leaves, then pour what arrives', () => {
+    const [drainStart, drainEnd, pourStart, pourEnd] = messageTiming(true, true);
+    expect(drainStart).toBeLessThan(pourStart); // old ink starts leaving first…
+    expect(drainEnd).toBeLessThan(pourEnd); // …and is gone before the new ink settles
+    expect(pourEnd).toBeLessThanOrEqual(1);
+    // Adding only (BLK → BLK46) pours for most of the melt; removing only drains for most of it.
+    expect(messagePlan(base(['BLK']), base(['BLK46'])).timing).toEqual(messageTiming(false, true));
+    expect(messagePlan(base(['BLK46']), base(['BLK'])).timing).toEqual(messageTiming(true, false));
+    const [, , addStart, addEnd] = messageTiming(false, true);
+    const [cutStart, cutEnd] = messageTiming(true, false);
+    expect(addEnd - addStart).toBeGreaterThan(0.7);
+    expect(cutEnd - cutStart).toBeGreaterThan(0.6);
+    expect(messagePlan(base(['BLK']), base(['LOVE'])).timing).toEqual(messageTiming(true, true));
+    expect(messagePlan(base(['BLK']), base(['BLK46'])).shift).toEqual([1, 0]);
+  });
+
+  it('marks only the matched run as shared, in centred coordinates of the old message', () => {
+    const [x0, y0, x1, y1] = messagePlan(base(['BLK']), base(['BLK46'])).sharedBox;
+    expect([x0, x1]).toEqual([-1.5, 1.5]); // B's left edge to K's right edge
+    expect(y0).toBeLessThan(0.35 - 0.7); // above the caps (baseline sits 0.35 below centre)
+    expect(y1).toBeGreaterThan(0.35);
+    // Letters that merely overlap by chance are not shared: they drain and pour.
+    expect(messagePlan(base(['BLK']), base(['LOVE'])).sharedBox).toBeNull();
+  });
+
+  it('keeps both centred when they share fewer than two visible letters', () => {
+    expect(messageAlignment(base(['BLK']), base(['46']))).toEqual([0, 0]);
+    expect(messageAlignment(base(['A B']), base(['A CD']))).toEqual([0, 0]);
   });
 });
 

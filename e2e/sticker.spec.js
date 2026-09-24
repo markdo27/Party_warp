@@ -137,9 +137,12 @@ test.afterEach(() => {
 });
 
 test('renders glyphs, silhouette and outer stroke', async ({ page }) => {
+  // Grain nudges pixel colours; switch it off so the shares measure the shapes, not noise.
+  await setRange(page, 'Grain', 0);
+  await page.waitForTimeout(150);
   const shares = await colourShares(page, await stageShot(page));
   expect(shares.red).toBeGreaterThan(0.05);
-  expect(shares.pink).toBeGreaterThan(0.02);
+  expect(shares.pink).toBeGreaterThan(0.012); // a thin outline: about 2% of the stage by default
   expect(shares.white).toBeGreaterThan(0.05);
 });
 
@@ -779,4 +782,44 @@ test('the tagline takes its own typeface, including uploads', async ({ page }) =
   await page.getByRole('button', { name: 'Remove MyDisplay' }).click();
   await expect(tagFaces).toHaveCount(1);
   await expect(tagFaces.first()).toBeChecked();
+});
+
+/** Horizontal extent (px) of white ink in a screenshot. */
+function whiteSpan(page, png) {
+  return page.evaluate(async (b64) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${b64}`;
+    await img.decode();
+    const c = Object.assign(document.createElement('canvas'), { width: img.width, height: img.height });
+    const ctx = c.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    const { data } = ctx.getImageData(0, 0, img.width, img.height);
+    let [x0, x1] = [img.width, -1];
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i] > 200 && data[i + 1] > 200 && data[i + 2] > 200) {
+        const x = (i / 4) % img.width;
+        x0 = Math.min(x0, x);
+        x1 = Math.max(x1, x);
+      }
+    }
+    return x1 - x0;
+  }, png.toString('base64'));
+}
+
+test('melts from one message into the next', async ({ page }) => {
+  await freezeWarp(page);
+  await page.getByRole('switch', { name: 'Melt between messages' }).click();
+  await page.getByLabel('Sticker text').fill('BLK');
+  await page.getByPlaceholder('Type the next message…').fill('BLK46');
+  await setRange(page, 'Hold each message', 1.5);
+  await setRange(page, 'Melting time', 1);
+  await expect(page.getByRole('img', { name: /BLK → BLK46/ })).toBeAttached();
+  await page.getByRole('button', { name: 'Play from start' }).click();
+  const start = Date.now();
+  await page.waitForTimeout(700);
+  const first = await whiteSpan(page, await stageShot(page));
+  await page.waitForTimeout(Math.max(0, 3200 - (Date.now() - start)));
+  const second = await whiteSpan(page, await stageShot(page));
+  expect(first).toBeGreaterThan(50);
+  expect(second).toBeGreaterThan(first * 1.3); // BLK46 is wider than BLK
 });
