@@ -51,6 +51,7 @@ import {
   mapBreaks,
   motionClock,
   noise1,
+  ovalGeometry,
   pickVideoType,
   randomPalette,
   rowColToCaret,
@@ -839,6 +840,29 @@ describe('zip writer', () => {
 });
 
 describe('designLayout', () => {
+  it('keeps an oval frame visible even before text is entered', () => {
+    const L = layoutFor('oval', { scene: { ...scene, empty: true } });
+    expect(L.oval).toHaveLength(4);
+    expect(L.bounds.width).toBeGreaterThan(L.bounds.height);
+    expect(L.warpDomain.size).toEqual([L.bounds.width, L.bounds.height]);
+  });
+
+  it('fits short, long, and stacked text inside the oval with room for motion', () => {
+    for (const [width, height] of [[2, 0.7], [15, 0.7], [4, 5]]) {
+      const box = { x: -width / 2, y: -height / 2, width, height };
+      const params = sanitizeParams({ design: 'oval' });
+      const { ellipse: [cx, cy, rx, ry], bounds } = ovalGeometry(box, params);
+      expect(cx).toBe(0);
+      expect(cy).toBe(0);
+      expect((width / 2 / rx) ** 2 + (height / 2 / ry) ** 2).toBeLessThan(1);
+      expect(rx / ry).toBeCloseTo(params.ovalAspect);
+      expect(bounds.width).toBeGreaterThan(2 * rx);
+      expect(bounds.height).toBeGreaterThan(2 * ry);
+      const padded = ovalGeometry(box, { ...params, ovalPadding: 0.8 });
+      expect(padded.bounds.width).toBeGreaterThan(bounds.width);
+    }
+  });
+
   it('falls back to a sticker for removed layouts in saved settings', () => {
     for (const design of ['badge', 'ribbon']) expect(sanitizeParams({ design }).design).toBe('sticker');
   });

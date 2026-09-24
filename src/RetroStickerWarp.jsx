@@ -26,6 +26,7 @@
  *     in screen pixels. SVG export reads raw coverage, so vectors stay clean.
  */
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { loadSvgLogo } from './svgLogo.js';
 import {
   AlignCenter,
   AlignLeft,
@@ -34,6 +35,7 @@ import {
   Check,
   ChevronDown,
   Copy,
+  Circle,
   Dices,
   Download,
   Eraser,
@@ -62,8 +64,8 @@ import {
   X,
 } from 'lucide-react';
 
-const DESIGN_ICONS = { sticker: Sticker, bands: Rows3, wallpaper: LayoutGrid };
-const PANEL_TABS = ['Text', 'Style', 'Motion', 'Export'];
+const DESIGN_ICONS = { sticker: Sticker, bands: Rows3, wallpaper: LayoutGrid, oval: Circle };
+const PANEL_TABS = ['Content', 'Style', 'Motion', 'Export'];
 const MOTION_PRESETS = [
   { name: 'Gentle', settings: { speed: 0.6, intensity: 0.2, frequency: 0.7, swell: 0.2, stretch: 0.15, italic: 0.1, boil: false } },
   { name: 'Liquid', settings: { speed: 1, intensity: 0.5, frequency: 1, swell: 0.5, stretch: 0.35, italic: 0.3, boil: false } },
@@ -176,6 +178,7 @@ export const DESIGN_LOOKS = Object.freeze({
   sticker: { pad: 0.18, stroke: 0.12, stretch: 0.35, italic: 0.3, intensity: 0.5, tracking: -0.01 },
   bands: { pad: 0.13, stroke: 0.065, stretch: 0.8, italic: 0.3, intensity: 0.4, tracking: -0.02 },
   wallpaper: { pad: 0.16, stroke: 0.1, stretch: 0.35, italic: 0.25, intensity: 0.45, tracking: -0.01 },
+  oval: { pad: 0.07, stroke: 0.1, stretch: 0.2, italic: 0.12, intensity: 0.3, tracking: -0.01, align: 'center', sticker: true },
 });
 
 /** The variations. `line` designs set the lockup on one line; the others keep its rows. */
@@ -183,9 +186,10 @@ export const DESIGN_INFO = Object.freeze({
   sticker: { name: 'Sticker', blurb: 'One warped sticker lockup you can type on directly.', line: false },
   bands: { name: 'Marquee', blurb: 'Scrolling colour bands repeat the text with a tagline.', line: true },
   wallpaper: { name: 'Wallpaper', blurb: 'A tilted sticker-bomb tiling with alternating colourways.', line: false },
+  oval: { name: 'Oval', blurb: 'Type a name or initials inside a soft oval ring. The frame grows to fit your text.', line: false },
 });
 export const DESIGNS = Object.keys(DESIGN_INFO);
-const MODE_INDEX = Object.freeze({ sticker: 0, bands: 1, wallpaper: 2 });
+const MODE_INDEX = Object.freeze({ sticker: 0, bands: 1, wallpaper: 2, oval: 3 });
 
 const ALIGNS = ['zigzag', 'left', 'center', 'right'];
 const EXPORT_SCOPES = ['whole', 'line'];
@@ -213,6 +217,9 @@ export const DEFAULTS = Object.freeze({
   pad: 0.18,
   stroke: 0.12,
   goo: 0.35,
+  ovalAspect: 2.4,
+  ovalRing: 0.16,
+  ovalPadding: 0.06,
   grain: 0.22,
   halftone: 0,
   dotSize: 9,
@@ -251,6 +258,9 @@ export const RANGES = Object.freeze({
   pad: { min: 0.04, max: 0.45, step: 0.005 },
   stroke: { min: 0, max: 0.25, step: 0.005 },
   goo: { min: 0, max: 1, step: 0.01 },
+  ovalAspect: { min: 1.4, max: 4, step: 0.1 },
+  ovalRing: { min: 0.03, max: 0.35, step: 0.01 },
+  ovalPadding: { min: 0.04, max: 0.8, step: 0.01 },
   grain: { min: 0, max: 1, step: 0.01 },
   halftone: { min: 0, max: 1, step: 0.01 },
   dotSize: { min: 3, max: 32, step: 1 },
@@ -702,6 +712,21 @@ export function stickerReach(params) {
 /** The ink box grown by everything drawn around it. Stretching preserves row widths. */
 export const stickerBounds = (inkBox, params) => expandBox(inkBox, stickerReach(params));
 
+/** Fit text inside an ellipse. Tight spacing lets the letters melt into the inner ring. */
+export function ovalGeometry(inkBox, params) {
+  const clearance = params.ovalPadding + Math.max(0, params.weight) + 0.045 * params.swell + ITALIC_MAX * params.italic * 0.4;
+  const a = inkBox.width / 2 + clearance;
+  const b = inkBox.height / 2 + clearance;
+  const rx = Math.hypot(a, params.ovalAspect * b);
+  const ry = rx / params.ovalAspect;
+  const cx = inkBox.x + inkBox.width / 2;
+  const cy = inkBox.y + inkBox.height / 2;
+  return {
+    ellipse: [cx, cy, rx, ry],
+    bounds: expandBox({ x: cx - rx, y: cy - ry, width: rx * 2, height: ry * 2 }, stickerReach(params)),
+  };
+}
+
 /**
  * Marquee band layout in em. Each period holds a sticker slot [0, stickerW) and a tagline
  * slot starting at `tagSlotX`. `slot` maps slot coordinates back into the two fields:
@@ -737,11 +762,21 @@ export const packPalettes = (list) =>
  * palettes, stretch row count and the design's own geometry. Null until there's ink.
  */
 export function designLayout({ design, scene, tagBox, params, stage, free }) {
-  if (!scene || scene.empty || !stage.width || !stage.height) return null;
+  if (!scene || (scene.empty && design !== 'oval') || !stage.width || !stage.height) return null;
   const mode = MODE_INDEX[design] ?? 0;
   const sticker = { bg: params.bg, sil: params.sil, fill: params.fill, line: params.line, tag: params.line };
   const theme = BAND_THEMES.find((t) => t.id === params.bandTheme) ?? BAND_THEMES[0];
   const result = (layout) => ({ ...layout, mode, palettes: packPalettes(layout.colours), stageRgb: hexToRgb01(layout.stage) });
+
+  if (design === 'oval') {
+    const { ellipse, bounds } = ovalGeometry(scene.empty ? { x: -1.5, y: -0.4, width: 3, height: 0.8 } : scene.inkBox, params);
+    return result({
+      view: computeView(free, bounds, params.fontSize),
+      warpDomain: { origin: [bounds.x, bounds.y], size: [bounds.width, bounds.height] },
+      colours: [sticker, sticker, sticker], stage: params.bg,
+      rows: scene.layout.rows.length, bounds, oval: ellipse,
+    });
+  }
 
   if (design === 'sticker') {
     const bounds = stickerBounds(scene.inkBox, params);
@@ -1371,6 +1406,49 @@ function rasterizeSticker(canvas, { lines, family, lineSpacing, tracking, align,
   };
 }
 
+/** Crop transparent margins and feed the logo's alpha into the same field pipeline as type. */
+function rasterizeLogo(asset, maxSide) {
+  const sample = document.createElement('canvas');
+  sample.width = asset.width;
+  sample.height = asset.height;
+  const source = sample.getContext('2d', { willReadFrequently: true });
+  if (!source) throw new Error('Canvas 2D is unavailable.');
+  source.drawImage(asset.image, 0, 0, sample.width, sample.height);
+  const crop = readAlpha(source, sample.width, sample.height).box;
+  if (!crop) throw new Error('This SVG has no visible shapes. Check its fills and opacity.');
+  const [x0, y0, x1, y1] = crop;
+  const cropW = x1 - x0 + 1;
+  const cropH = y1 - y0 + 1;
+  const scale = 6 / Math.max(cropW, cropH);
+  const shapeW = cropW * scale;
+  const shapeH = cropH * scale;
+  const domainW = shapeW + 2 * FIELD_PAD_EM;
+  const domainH = shapeH + 2 * FIELD_PAD_EM;
+  const pxPerEm = Math.min(SDF_PX_PER_EM, Math.sqrt(MAX_FIELD_PIXELS / (domainW * domainH)), (maxSide - 2) / Math.max(domainW, domainH));
+  const width = Math.ceil(domainW * pxPerEm);
+  const height = Math.ceil(domainH * pxPerEm);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('Canvas 2D is unavailable.');
+  ctx.drawImage(sample, x0, y0, cropW, cropH, FIELD_PAD_EM * pxPerEm, FIELD_PAD_EM * pxPerEm, shapeW * pxPerEm, shapeH * pxPerEm);
+  const { alpha, box } = readAlpha(ctx, width, height);
+  if (!box) throw new Error('This logo is too thin to render. Try a thicker shape.');
+  const glyphSdf = [classField(alpha, width, height, box, Math.ceil(CLASS_MARGIN_EM * pxPerEm)), null, null, null];
+  const originEm = [-shapeW / 2 - FIELD_PAD_EM, -shapeH / 2 - FIELD_PAD_EM];
+  return {
+    empty: false,
+    isLogo: true,
+    layout: { rows: [{ baseline: shapeH / 2 }], capHeight: shapeH, gap: shapeH },
+    inkBox: inkBoxEm(box, originEm, pxPerEm),
+    glyphSdf,
+    sil: silhouetteField(unionField(glyphSdf, width, height), width, height, pxPerEm),
+    width, height, pxPerEm, originEm,
+    sizeEm: [width / pxPerEm, height / pxPerEm],
+  };
+}
+
 /**
  * The marquee's small print: plain Archivo, unwarped, as a distance field in sticker ems
  * so it stays crisp at any band size. Returns null when there is nothing to draw.
@@ -1560,7 +1638,9 @@ uniform float uSticker;        // 1 draws the silhouette and outer stroke
 uniform float uStretchOn;
 uniform vec2 uStretchDomain;   // x0, width (em)
 uniform vec2 uRowGeom;         // first lockup row centre y, row gap (em)
-uniform int uMode;             // 0 sticker, 1 marquee, 2 wallpaper
+uniform int uMode;             // 0 sticker, 1 marquee, 2 wallpaper, 3 oval
+uniform vec4 uOval;            // centre xy, radii xy in the text's field coordinates
+uniform float uOvalRing;
 uniform int uOutput;           // 0 colour, 1 coverage (glyph, body, edge, tag)
 uniform int uSelect;           // -1 every colourway, else only this one (SVG tracing)
 uniform vec2 uFocus;           // wallpaper centre (em)
@@ -1731,11 +1811,26 @@ vec2 fieldAt(vec2 w, float row, float pivot, float t) {
 }
 
 // Coverage of glyph, silhouette body, outer stroke edge and tagline for one layer.
+float ellipseDistance(vec2 p, vec2 radii) {
+  float k0 = length(p / radii);
+  if (k0 < 1.0e-5) return -min(radii.x, radii.y);
+  float k1 = length(p / (radii * radii));
+  return k0 * (k0 - 1.0) / max(k1, 1.0e-5);
+}
+
 vec4 coverages(Layer L, vec2 offset, float swellN, float wobble) {
   vec2 w = L.q + offset;
   float t = uWeight + swellN * uSwell;
   vec2 d = fieldAt(w, L.row, L.pivot, t);
-  float glyph = cover(d.r - t);
+  float ink = d.r - t;
+  if (uMode == 3) {
+    float oval = ellipseDistance(w - uOval.xy, uOval.zw);
+    float thickness = uOvalRing * (1.0 + 0.15 * swellN * uSwellAmt);
+    float ring = abs(oval + thickness * 0.5) - thickness * 0.5;
+    ink = smin(ink, ring, uGooK, 1.0);
+    d.g = oval;
+  }
+  float glyph = cover(ink);
   float body = uSticker * cover(d.g - uPad - wobble);
   float edge = uSticker * cover(d.g - uPad - wobble - uStroke * (1.0 + 0.4 * swellN * uSwellAmt));
   float tag = cover(texture(uTag, (L.tq - uTagOrigin) / uTagSize).r);
@@ -1918,6 +2013,10 @@ const ZERO4 = [0, 0, 0, 0];
 
 // Stand-in tagline field: one texel "far away" from any ink.
 const NO_TAG = Object.freeze({ width: 1, height: 1, originEm: [0, 0], sizeEm: [1, 1], data: new Float32Array([1000]) });
+const EMPTY_OVAL_FIELD = Object.freeze({
+  width: 1, height: 1, originEm: [-1, -1], sizeEm: [2, 2], body: { width: 1, height: 1 },
+  data: { glyphs: new Float32Array(4).fill(FIELD_LIMIT_EM), body: new Float32Array([FIELD_LIMIT_EM]) },
+});
 
 function createTexture(gl, filter) {
   const tex = gl.createTexture();
@@ -2091,6 +2190,8 @@ function createRenderer(canvas) {
     gl.uniform3fv(u('uBg'), frame.stage);
     PALETTE_UNIFORMS.forEach(([key, name]) => gl.uniform3fv(u(name), frame.palettes[key]));
     gl.uniform1i(u('uMode'), frame.mode);
+    gl.uniform4fv(u('uOval'), frame.oval ?? [0, 0, 1, 1]);
+    gl.uniform1f(u('uOvalRing'), frame.ovalRing ?? 0.16);
     gl.uniform1i(u('uOutput'), frame.output ?? 0);
     gl.uniform1i(u('uSelect'), frame.select ?? -1);
     gl.uniform2fv(u('uFocus'), frame.focus ?? [0, 0]);
@@ -2262,6 +2363,7 @@ function exportFraming(live, clock, { scope, line, repeats, maxSide, wholeScale 
     };
   }
   if (p.design === 'sticker') return fitBox(expandBox(stickerBounds(scene.inkBox, p), 0.08));
+  if (p.design === 'oval') return fitBox(expandBox(L.bounds, 0.08));
   const scale = Math.min(wholeScale, maxSide / Math.max(stage.width, stage.height));
   return {
     width: size(stage.width * scale),
@@ -2388,7 +2490,7 @@ const currentDpr = () => clamp(window.devicePixelRatio || 1, 1, 2);
  * `cache` keeps both buffers between frames.
  */
 function computeStretchFrame(scene, params, time, rowCount, cache) {
-  if (!scene || scene.empty || !(params.stretch > 0 || params.italic > 0)) return null;
+  if (!scene || scene.empty || scene.isLogo || !(params.stretch > 0 || params.italic > 0)) return null;
   const rows = DESIGN_INFO[params.design]?.line
     ? Array.from({ length: rowCount }, (_, b) => ({ row: scene.layout.rows[0], seed: b + 1 }))
     : scene.layout.rows.map((row, i) => ({ row, seed: i + 1 }));
@@ -2452,6 +2554,8 @@ function frameFromLive(live, clock, stretch) {
     warpDomain: L?.warpDomain ?? null,
     stretch: stretch && { domain: stretch.domain, rowGeom: live.rowGeom },
     focus: L?.focus,
+    oval: L?.oval,
+    ovalRing: p.ovalRing,
     ...(L?.band && { band: [L.band.bandH, L.band.period, L.band.tagSlotX, scroll % L.band.period], slot: L.band.slot }),
     ...(L?.tile && { tile: [L.tile.width, L.tile.height, TILE_ANGLE, scroll % (2 * L.tile.width)], tileOrigin: L.tile.origin }),
   };
@@ -2709,6 +2813,9 @@ export default function RetroStickerWarp({
   className = '',
 }) {
   const [text, setText] = useState(() => sanitizeInput(initialText));
+  const [uploadedLogo, setLogo] = useState(null);
+  const [logoLoading, setLogoLoading] = useState(false);
+  const [logoError, setLogoError] = useState('');
   const [tagline, setTagline] = useState(() => sanitizeTagline(initialTagline));
   const [params, setParams] = useState(() => sanitizeParams(initialSettings));
   const [uploadedFonts, setUploadedFonts] = useState([]);
@@ -2717,7 +2824,7 @@ export default function RetroStickerWarp({
   const [dropActive, setDropActive] = useState(false);
   const [playing, setPlaying] = useState(() => !prefersReducedMotion());
   const [panelPref, setPanelPref] = useState(null); // null → follow the stage width until toggled
-  const [panelTab, setPanelTab] = useState('Text');
+  const [panelTab, setPanelTab] = useState('Content');
   const panelId = useId();
   const [stage, setStage] = useState({ width: 0, height: 0 });
   const [panelRect, setPanelRect] = useState(null);
@@ -2740,6 +2847,8 @@ export default function RetroStickerWarp({
   const focusAfterPanelRef = useRef(null); // 'panel' | 'text' | 'toggle' — focus target after toggling
   const typeRef = useRef(null);
   const panelTextRef = useRef(null);
+  const logoInputRef = useRef(null);
+  const logoRequestRef = useRef(0);
   const caretRequestRef = useRef(null);
   const caretElRef = useRef(null);
   const selectionLayerRef = useRef(null);
@@ -2757,8 +2866,11 @@ export default function RetroStickerWarp({
   const uploadedFontsRef = useRef(uploadedFonts);
 
   const { design } = params;
+  // Oval is an editable text layout; keep an uploaded logo available for the other layouts.
+  const logo = design === 'oval' ? null : uploadedLogo;
   const oneLine = DESIGN_INFO[design].line; // the lockup set on one line, with a tagline
-  const isSticker = design === 'sticker'; // the only design you type on directly
+  const isSticker = design === 'sticker' || design === 'oval'; // layouts with direct text editing
+  const canTypeOnStage = isSticker && !logo;
   const bandLike = design === 'bands'; // band themes + single-line export
   const panelOpen = panelPref ?? stage.width >= PANEL_AUTO_OPEN_WIDTH;
   const lines = useMemo(() => displayLines(text, params.caps), [text, params.caps]);
@@ -2920,30 +3032,30 @@ export default function RetroStickerWarp({
   // Rebuild the distance field when text or type settings change (coalesced per frame).
   useEffect(() => {
     const renderer = rendererRef.current;
-    if (!renderer || !fontState.family) return undefined;
+    if (!renderer || (!logo && !fontState.family)) return undefined;
     const handle = requestAnimationFrame(() => {
       try {
         const settings = [params.lineSpacing, params.tracking, params.align];
-        const key = JSON.stringify([fieldLines, fontState, settings, renderer.maxSize, glyphEpoch]);
+        const key = logo ? `logo:${logo.id}:${renderer.maxSize}` : JSON.stringify([fieldLines, fontState, settings, renderer.maxSize, glyphEpoch]);
         if (baseRef.current?.key !== key) {
           rasterRef.current ??= document.createElement('canvas');
           baseRef.current = {
             key,
-            ...rasterizeSticker(rasterRef.current, {
+            ...(logo ? (logo.maxSide === renderer.maxSize ? logo.base : rasterizeLogo(logo, renderer.maxSize)) : rasterizeSticker(rasterRef.current, {
               lines: fieldLines,
               family: fontState.family,
               lineSpacing: params.lineSpacing,
               tracking: params.tracking,
               align: params.align,
               maxSide: renderer.maxSize,
-            }),
+            })),
           };
-          if (fontState.loaded) requestMissingGlyphs(fontState.family, fieldLines.join(''));
+          if (!logo && fontState.loaded) requestMissingGlyphs(fontState.family, fieldLines.join(''));
         }
         const base = baseRef.current;
         renderer.setField(
           base.empty
-            ? null
+            ? (design === 'oval' ? EMPTY_OVAL_FIELD : null)
             : {
                 width: base.width,
                 height: base.height,
@@ -2957,17 +3069,20 @@ export default function RetroStickerWarp({
           layout: base.layout,
           inkBox: base.inkBox,
           empty: base.empty,
+          isLogo: Boolean(base.isLogo),
           fieldOrigin: base.originEm,
           fieldSize: base.sizeEm,
         });
         dirtyRef.current = true;
       } catch (err) {
         console.error('[RetroStickerWarp] failed to build the sticker', err);
-        notify('error', 'Could not build the sticker for this text.');
+        notify('error', 'Could not build the artwork. Try a simpler shape or shorter text.');
       }
     });
     return () => cancelAnimationFrame(handle);
   }, [
+    design,
+    logo,
     fieldLines,
     fontState,
     params.lineSpacing,
@@ -3008,14 +3123,14 @@ export default function RetroStickerWarp({
 
   // Caret and selection in em; the render loop slides them along with the stretched letters.
   const caretEm = useMemo(() => {
-    if (!isSticker || !typing || !scene || selection.start !== selection.end) return null;
+    if (!canTypeOnStage || !typing || !scene || scene.isLogo || selection.start !== selection.end) return null;
     const { row, col } = caretToRowCol(text, selection.end);
     const g = caretGeometry(scene.layout, row, col);
     return g && { row: Math.min(row, scene.layout.rows.length - 1), ...g };
-  }, [isSticker, typing, scene, selection, text]);
+  }, [canTypeOnStage, typing, scene, selection, text]);
 
   const selectionEm = useMemo(() => {
-    if (!isSticker || !typing || !scene || selection.start === selection.end) return [];
+    if (!canTypeOnStage || !typing || !scene || scene.isLogo || selection.start === selection.end) return [];
     const firstRow = caretToRowCol(text, Math.min(selection.start, selection.end)).row;
     return selectionRects(scene.layout, text, selection.start, selection.end).map((r, i) => ({
       row: firstRow + i,
@@ -3024,7 +3139,7 @@ export default function RetroStickerWarp({
       top: r.top,
       bottom: r.bottom,
     }));
-  }, [isSticker, typing, scene, selection, text]);
+  }, [canTypeOnStage, typing, scene, selection, text]);
 
   // Hand the latest state to the render loop without restarting it.
   useEffect(() => {
@@ -3144,10 +3259,20 @@ export default function RetroStickerWarp({
 
   const focusTyping = useCallback(
     (index) => {
+      if (logo) {
+        if (panelOpen && panelTab === 'Content') {
+          logoInputRef.current?.focus();
+          return;
+        }
+        focusAfterPanelRef.current = 'logo';
+        setPanelTab('Content');
+        setPanelPref(true);
+        return;
+      }
       // Only the single sticker is typed on directly; the other designs edit in the panel.
-      if (!isSticker && (!panelOpen || panelTab !== 'Text')) {
+      if (!isSticker && (!panelOpen || panelTab !== 'Content')) {
         focusAfterPanelRef.current = 'text';
-        setPanelTab('Text');
+        setPanelTab('Content');
         setPanelPref(true);
         return;
       }
@@ -3164,7 +3289,7 @@ export default function RetroStickerWarp({
       ta.setSelectionRange(pos, pos);
       syncSelection();
     },
-    [isSticker, panelOpen, panelTab, syncSelection],
+    [logo, isSticker, panelOpen, panelTab, syncSelection],
   );
 
   const placeCaret = useCallback(
@@ -3173,7 +3298,7 @@ export default function RetroStickerWarp({
       const stageEl = stageRef.current;
       if (!ta || !stageEl) return;
       ta.focus({ preventScroll: true });
-      if (scene && view && !scene.empty) {
+      if (scene && view && !scene.empty && !scene.isLogo) {
         const rect = stageEl.getBoundingClientRect();
         const [x, y] = cssToEm(view, [event.clientX - rect.left, event.clientY - rect.top]);
         // Undo the current stretch so the click lands on the glyph it visually hit.
@@ -3208,6 +3333,45 @@ export default function RetroStickerWarp({
   );
 
   /* ── Fonts, design ── */
+
+  useEffect(() => () => { logoRequestRef.current += 1; }, []);
+
+  const onLogoFiles = useCallback(async (files) => {
+    const file = files?.[0];
+    if (!file) return;
+    const request = ++logoRequestRef.current;
+    setLogoLoading(true);
+    setLogoError('');
+    try {
+      const asset = await loadSvgLogo(file);
+      if (request !== logoRequestRef.current) return;
+      const maxSide = rendererRef.current?.maxSize ?? 2048;
+      const base = rasterizeLogo(asset, maxSide);
+      setLogo({ ...asset, id: request, base, maxSide });
+      setParams((prev) => prev.design === 'oval' ? sanitizeParams({ ...prev, ...DESIGN_LOOKS.sticker, design: 'sticker' }) : prev);
+      setTyping(false);
+      setPanelTab('Content');
+      setPanelPref(true);
+      notify('success', 'SVG logo ready');
+    } catch (error) {
+      if (request === logoRequestRef.current) {
+        setLogoError(error instanceof Error ? error.message : 'Could not read this SVG logo.');
+        setPanelTab('Content');
+        setPanelPref(true);
+      }
+    } finally {
+      if (request === logoRequestRef.current) setLogoLoading(false);
+    }
+  }, [notify]);
+
+  const removeLogo = useCallback(() => {
+    logoRequestRef.current += 1;
+    setLogo(null);
+    setLogoLoading(false);
+    setLogoError('');
+    setTyping(false);
+    setPanelTab('Content');
+  }, []);
 
   const onFontFiles = useCallback(
     async (files) => {
@@ -3257,13 +3421,19 @@ export default function RetroStickerWarp({
       if (!event.dataTransfer?.files?.length) return;
       event.preventDefault();
       setDropActive(false);
-      onFontFiles(event.dataTransfer.files);
+      const files = event.dataTransfer.files;
+      if (/\.svg$/i.test(files[0].name)) onLogoFiles(files);
+      else onFontFiles(files);
     },
-    [onFontFiles],
+    [onFontFiles, onLogoFiles],
   );
 
   /** Switching design applies that design's recommended look (then everything is tweakable). */
   const setDesign = useCallback((design) => {
+    if (design === 'oval') {
+      logoRequestRef.current += 1;
+      setLogoLoading(false);
+    }
     setParams((prev) => (prev.design === design ? prev : sanitizeParams({ ...prev, ...DESIGN_LOOKS[design], design })));
   }, []);
 
@@ -3279,7 +3449,7 @@ export default function RetroStickerWarp({
     const target = focusAfterPanelRef.current;
     if (!target) return;
     focusAfterPanelRef.current = null;
-    const targets = { panel: panelCloseRef, text: panelTextRef, toggle: panelToggleRef };
+    const targets = { panel: panelCloseRef, text: panelTextRef, toggle: panelToggleRef, logo: logoInputRef };
     const el = targets[target].current ?? typeRef.current;
     el?.focus({ preventScroll: true });
   }, [panelOpen, panelTab]);
@@ -3314,13 +3484,13 @@ export default function RetroStickerWarp({
   const exportScope = bandLike ? params.exportScope : 'whole';
   const exportBase = useCallback(
     (suffix = '') => {
-      const parts = [fileNameFor(lines).replace(/\.png$/, '')];
+      const parts = [fileNameFor(logo ? [logo.name.replace(/\.svg$/i, '')] : lines).replace(/\.png$/, '')];
       if (design !== 'sticker') parts.push(DESIGN_INFO[design].name.toLowerCase());
       if (exportScope === 'line') parts.push('line');
       if (suffix) parts.push(suffix);
       return parts.join('-');
     },
-    [lines, design, exportScope],
+    [logo, lines, design, exportScope],
   );
 
   /** Frames an export of the live design; `kind` is 'still', 'svg' or 'motion'. */
@@ -3328,7 +3498,7 @@ export default function RetroStickerWarp({
     const renderer = rendererRef.current;
     const live = liveRef.current;
     if (!renderer) throw new Error('The renderer is not ready yet.');
-    if (!live?.layout) throw new Error('Nothing to export yet — type something first.');
+    if (!live?.layout) throw new Error('Nothing to export yet — add text or an SVG logo first.');
     const p = live.params;
     const limit = { still: EXPORT_MAX_SIDE, svg: SVG_MAX_SIDE, motion: MOTION_MAX_SIDE }[kind];
     const framing = exportFraming(live, clockRef.current, {
@@ -3483,11 +3653,11 @@ export default function RetroStickerWarp({
   const showToolbar = !(panelOpen && panelRect && panelRect.x <= stage.width * 0.35);
   const bandTheme = BAND_THEMES.find((t) => t.id === params.bandTheme) ?? BAND_THEMES[0];
   const stageColor = design === 'bands' ? bandTheme.bands[0].bg : params.bg;
-  const reading = oneLine
+  const reading = logo ? `${logo.name}${oneLine ? ` — ${tagline.replace(/\n/g, ' ')}` : ''}` : oneLine
     ? `${bandLine(lines) || 'empty'} — ${tagline.replace(/\n/g, ' ')}`
     : lines.join(' ').trim() || 'empty';
   const canvasLabel = { sticker: 'Animated sticker', bands: 'Scrolling marquee' }[design] ?? `${designName} design`;
-  const hint = !isSticker
+  const hint = logo ? 'SVG logo · replace or remove it in Content' : !isSticker
     ? `${designName} — edit the text in the panel`
     : typing
       ? 'Typing — Enter adds a line · Esc to finish'
@@ -3512,7 +3682,7 @@ export default function RetroStickerWarp({
           role="img"
           aria-label={`${canvasLabel} reading: ${reading}`}
         />
-        {isSticker && (
+        {canTypeOnStage && (
           <textarea
             ref={typeRef}
             value={text}
@@ -3579,20 +3749,20 @@ export default function RetroStickerWarp({
           className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-dashed border-white/20 bg-black/40 px-5 py-3 text-center"
           style={{ left: centerX, top: free.y + free.height / 2 }}
         >
-          <p className="text-[15px] font-semibold text-white/80">Nothing here yet</p>
+          <p className="text-[15px] font-semibold text-white/80">{design === 'oval' ? 'Type inside your oval' : 'Nothing here yet'}</p>
           <p className="mt-0.5 text-[12px] text-white/60">
             {isSticker ? 'Click anywhere and start typing' : 'Type the text in the panel'}
           </p>
         </div>
       )}
 
-      {/* Font drop target */}
+      {/* Artwork and font drop target */}
       {dropActive && (
         <div className="pointer-events-none absolute inset-3 z-50 grid place-items-center rounded-3xl border-2 border-dashed border-[#ffc8f8] bg-black/70 backdrop-blur-sm">
           <div className="text-center">
             <FileUp size={28} className="mx-auto mb-2 text-[#ffc8f8]" aria-hidden />
-            <p className="text-[15px] font-semibold">Drop a font to use it</p>
-            <p className="mt-1 text-[12px] text-white/65">.ttf · .otf · .woff · .woff2</p>
+            <p className="text-[15px] font-semibold">Drop an SVG logo or font</p>
+            <p className="mt-1 text-[12px] text-white/65">.svg · .ttf · .otf · .woff · .woff2</p>
           </div>
         </div>
       )}
@@ -3623,10 +3793,10 @@ export default function RetroStickerWarp({
               <LayoutTemplate size={18} aria-hidden />
             </ToolButton>
             <ToolDivider />
-            <ToolButton label="Type on sticker" onClick={() => focusTyping()} className="hidden sm:grid">
+            <ToolButton label={logo ? "Change logo" : "Type on sticker"} onClick={() => focusTyping()} className="hidden sm:grid">
               <TextCursorInput size={18} aria-hidden />
             </ToolButton>
-            <ToolButton label="Clear text" onClick={clearText}>
+            <ToolButton label={logo ? "Remove logo" : "Clear text"} onClick={logo ? removeLogo : clearText}>
               <Eraser size={18} aria-hidden />
             </ToolButton>
             <ToolButton label="Shuffle colours" onClick={shufflePalette} className="hidden sm:grid">
@@ -3702,13 +3872,13 @@ export default function RetroStickerWarp({
           </div>
 
           <div ref={panelScrollRef} className="rsw-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain">
-            <PanelPage name="Text" active={panelTab} panelId={panelId}>
+            <PanelPage name="Content" active={panelTab} panelId={panelId}>
             <Section icon={LayoutTemplate} title="Choose a layout">
               <div
                 role="radiogroup"
                 aria-label="Design"
                 onKeyDown={(e) => onRadioGroupKeyDown(e, DESIGNS, design, setDesign)}
-                className="grid grid-cols-3 gap-1.5"
+                className="grid grid-cols-4 gap-1.5"
               >
                 {DESIGNS.map((id) => {
                   const active = id === design;
@@ -3732,10 +3902,31 @@ export default function RetroStickerWarp({
                   );
                 })}
               </div>
-              <p className="text-[11px] leading-relaxed text-white/60">{DESIGN_INFO[design].blurb}</p>
+              <p className="text-[11px] leading-relaxed text-white/60">{logo ? 'Your logo uses this layout. Adjust its colours and motion in the next tabs.' : DESIGN_INFO[design].blurb}</p>
             </Section>
 
-            <Section icon={TextCursorInput} title="Write your message">
+            {design !== 'oval' && <Section icon={FileUp} title="Use your SVG logo">
+              <p className="text-[12px] leading-relaxed text-white/60">Upload a logo instead of text. Its shape uses your chosen colours and goo effect.</p>
+              <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-[#ffc8f8]/40 bg-[#ffc8f8]/5 px-3 py-3 text-[12px] font-medium text-[#ffc8f8] hover:bg-[#ffc8f8]/10 focus-within:ring-2 focus-within:ring-[#ffc8f8]/60">
+                {logoLoading ? <LoaderCircle size={16} className="animate-spin" aria-hidden /> : <FileUp size={16} aria-hidden />}
+                {logoLoading ? 'Loading SVG…' : logo ? 'Replace SVG logo' : 'Upload SVG logo'}
+                <input ref={logoInputRef} type="file" accept=".svg,image/svg+xml" aria-label="Upload SVG logo" className="sr-only"
+                  onChange={(event) => { onLogoFiles(event.target.files); event.target.value = ''; }} />
+              </label>
+              <p className="text-[11px] leading-relaxed text-white/55">SVG · up to 2 MB · transparent background recommended. Convert text to outlines before uploading.</p>
+              {logoError && <p role="alert" className="rounded-lg bg-red-400/10 p-2.5 text-[12px] leading-relaxed text-red-200">{logoError}</p>}
+              {logo && (
+                <div className="flex min-w-0 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                  <FileCode2 size={16} className="shrink-0 text-[#ffc8f8]" aria-hidden />
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-white/80" title={logo.name}>{logo.name}</span>
+                  <button type="button" onClick={removeLogo} className={`shrink-0 rounded-lg px-2 py-1.5 text-[12px] text-white/70 hover:bg-white/10 ${focusRing}`}>Use text instead</button>
+                </div>
+              )}
+              {logoLoading && <button type="button" onClick={() => { logoRequestRef.current += 1; setLogoLoading(false); }} className={`rounded-lg px-2 py-1 text-[12px] text-white/70 ${focusRing}`}>Cancel upload</button>}
+            </Section>}
+
+            <Section icon={TextCursorInput} title={logo ? "Logo settings" : "Write your message"}>
+              {!logo && (<>
               <textarea
                 ref={panelTextRef}
                 value={text}
@@ -3753,6 +3944,7 @@ export default function RetroStickerWarp({
                 <span>Enter adds a new line</span>
                 <span className="rsw-mono">{text.length}/{MAX_CHARS} · {text.split('\n').length}/{MAX_LINES} lines</span>
               </p>
+              </>)}
               {oneLine && (
                 <div>
                   <label htmlFor="rsw-tagline" className="mb-1.5 block text-[12px] text-white/70">
@@ -3770,6 +3962,7 @@ export default function RetroStickerWarp({
                   />
                 </div>
               )}
+              {!logo && (
               <div className="flex items-center gap-2">
                 <Toggle label="All caps" checked={params.caps} onChange={(v) => update('caps', v)} />
                 <button
@@ -3780,7 +3973,8 @@ export default function RetroStickerWarp({
                   <Eraser size={13} aria-hidden /> Clear
                 </button>
               </div>
-              {!oneLine && (
+              )}
+              {!oneLine && !logo && (
                 <Segmented
                   label="Text alignment"
                   value={params.align}
@@ -3793,10 +3987,10 @@ export default function RetroStickerWarp({
                   ]}
                 />
               )}
-              <Slider label="Text size" value={params.fontSize} range={RANGES.fontSize} format={fmt.px} onChange={(v) => update('fontSize', v)} />
+              <Slider label={logo ? "Logo size" : "Text size"} value={params.fontSize} range={RANGES.fontSize} format={fmt.px} onChange={(v) => update('fontSize', v)} />
             </Section>
 
-            <Section icon={Type} title="Advanced type" defaultOpen={false}>
+            {!logo && <Section icon={Type} title="Advanced type" defaultOpen={false}>
               <div
                 role="radiogroup"
                 aria-label="Typeface"
@@ -3859,7 +4053,7 @@ export default function RetroStickerWarp({
               )}
               <Slider label="Letter spacing" value={params.tracking} range={RANGES.tracking} format={fmt.em} onChange={(v) => update('tracking', v)} />
               <Slider label="Letter thickness" value={params.weight} range={RANGES.weight} format={fmt.em} onChange={(v) => update('weight', v)} />
-            </Section>
+            </Section>}
             </PanelPage>
             <PanelPage name="Style" active={panelTab} panelId={panelId}>
             <Section icon={Palette} title="Colours">
@@ -3920,7 +4114,7 @@ export default function RetroStickerWarp({
               </div>
               <Advanced title="Custom colours">
               <div className="grid grid-cols-2 gap-2">
-                <ColorField label="Text" value={params.fill} onChange={(v) => update('fill', v)} />
+                <ColorField label={logo ? "Logo" : "Text"} value={params.fill} onChange={(v) => update('fill', v)} />
                 <ColorField label="Sticker" value={params.sil} onChange={(v) => update('sil', v)} />
                 <ColorField label="Stroke" value={params.line} onChange={(v) => update('line', v)} />
                 <ColorField label="Background" value={params.bg} onChange={(v) => update('bg', v)} />
@@ -3930,10 +4124,19 @@ export default function RetroStickerWarp({
               )}
             </Section>
 
+            {design === 'oval' && <Section icon={Circle} title="Oval frame">
+              <Segmented label="Oval shape" value={params.ovalAspect} onChange={(v) => update('ovalAspect', v)} options={[
+                { value: 1.8, label: 'Tall' }, { value: 2.4, label: 'Classic' }, { value: 3.4, label: 'Wide' },
+              ]} />
+              <Slider label="Ring thickness" value={params.ovalRing} range={RANGES.ovalRing} format={fmt.emAbs} onChange={(v) => update('ovalRing', v)} />
+              <Slider label="Space around text" value={params.ovalPadding} range={RANGES.ovalPadding} format={fmt.emAbs} onChange={(v) => update('ovalPadding', v)} />
+              <p className="text-[11px] leading-relaxed text-white/55">The ring shares your text colour. Change the outer stroke below.</p>
+            </Section>}
+
             <Section icon={Sticker} title="Goo & outline">
               <div className="space-y-1">
                 <Slider label="Goo" value={params.goo} range={RANGES.goo} format={fmt.pct} onChange={(v) => update('goo', v)} />
-                <p className="text-[11px] leading-relaxed text-white/55">Melt neighbouring letters into soft bridges. Word spaces stay clear.</p>
+                <p className="text-[11px] leading-relaxed text-white/55">{logo ? 'Round the edges and soften the logo’s outline.' : 'Melt neighbouring letters into soft bridges. Word spaces stay clear.'}</p>
               </div>
               <Advanced title="Outline settings">
               <Toggle label="Sticker body & outline" checked={params.sticker} onChange={(v) => update('sticker', v)} />
@@ -4007,10 +4210,11 @@ export default function RetroStickerWarp({
               <Slider label="Speed" value={params.speed} range={RANGES.speed} format={fmt.times} onChange={(v) => update('speed', v)} />
               <Slider label="Wobble" value={params.intensity} range={RANGES.intensity} format={fmt.pct} onChange={(v) => update('intensity', v)} />
               <Advanced title="Advanced motion">
+              {logo && <p className="text-[11px] leading-relaxed text-white/55">Logos move as one shape. Letter stretch and tilt apply to text only.</p>}
               <Slider label="Wave detail" value={params.frequency} range={RANGES.frequency} format={fmt.times} onChange={(v) => update('frequency', v)} />
               <Slider label="Breathing" value={params.swell} range={RANGES.swell} format={fmt.pct} onChange={(v) => update('swell', v)} />
-              <Slider label="Stretch" value={params.stretch} range={RANGES.stretch} format={fmt.pct} onChange={(v) => update('stretch', v)} />
-              <Slider label="Letter tilt" value={params.italic} range={RANGES.italic} format={fmt.pct} onChange={(v) => update('italic', v)} />
+              <Slider label="Stretch" disabled={Boolean(logo)} value={params.stretch} range={RANGES.stretch} format={fmt.pct} onChange={(v) => update('stretch', v)} />
+              <Slider label="Letter tilt" disabled={Boolean(logo)} value={params.italic} range={RANGES.italic} format={fmt.pct} onChange={(v) => update('italic', v)} />
               {!isSticker && (
                 <Slider
                   label="Scroll"

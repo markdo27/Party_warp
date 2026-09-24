@@ -9,12 +9,17 @@ silhouette with a pink outline, warped live on the GPU. The default reads
 ## Features
 
 - **Live text.** Click the sticker and type. It re-flows and resizes as you go (up to six lines).
+- **SVG logos.** Upload or drop a static SVG (up to 2 MB) to use its shape with the editor’s
+  colours and goo effect in Sticker, Marquee, or Wallpaper. Replace it or return to your saved text. Convert
+  lettering to outlines; linked images, fonts, filters, and animations are unsupported.
 - **Motion.** Fluid warp with speed, intensity, frequency and swell. There's also a
   stop-motion "boil" mode at 4–15 fps.
 - **Letters with a life of their own.** Random letters stretch like extended cuts while
   others lean into italics, one letter at a time.
-- **Designs.** Sticker, Marquee (scrolling colour bands with a tagline), and Wallpaper (tilted tiling).
-- **Beginner controls.** Four tabs guide you through Text, Style, Motion, and Export. Start with
+- **Designs.** Sticker, Marquee (scrolling colour bands with a tagline), Wallpaper (tilted tiling),
+  and Oval (editable text inside a thick oval ring and outer stroke). The oval fits the text
+  automatically, with controls for its shape, ring thickness, and spacing.
+- **Beginner controls.** Four tabs guide you through Content, Style, Motion, and Export. Start with
   Gentle, Liquid, or Wild motion presets; open advanced settings when you want finer control.
 - **Print textures.** Film grain, a halftone dot screen and ordered dithering.
 - **Type.** Archivo Black built in; upload your own TTF / OTF / WOFF / WOFF2.

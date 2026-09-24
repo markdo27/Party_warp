@@ -590,10 +590,10 @@ test('goo melts the letters of each word together but keeps words apart', async 
 
 
 test('beginner panel keeps essentials visible and supports keyboard navigation', async ({ page }) => {
-  await expect(page.getByRole('radiogroup', { name: 'Design', exact: true }).getByRole('radio')).toHaveText(['Sticker', 'Marquee', 'Wallpaper']);
+  await expect(page.getByRole('radiogroup', { name: 'Design', exact: true }).getByRole('radio')).toHaveText(['Sticker', 'Marquee', 'Wallpaper', 'Oval']);
   await expect(page.getByRole('button', { name: 'Advanced type', exact: true })).toHaveAttribute('aria-expanded', 'false');
   await page.getByLabel('Sticker text', { exact: true }).fill('KEEP IT GOOEY');
-  await page.getByRole('tab', { name: 'Text', exact: true }).press('ArrowRight');
+  await page.getByRole('tab', { name: 'Content', exact: true }).press('ArrowRight');
   await expect(page.getByRole('tab', { name: 'Style', exact: true })).toBeFocused();
   await expect(page.getByRole('slider', { name: 'Goo', exact: true })).toBeVisible();
   await expect(page.getByRole('slider', { name: 'Grain', exact: true })).toHaveCount(0);
@@ -617,6 +617,138 @@ test('text shortcut returns to the message after changing marquee style', async 
   await page.getByRole('radio', { name: 'Marquee', exact: true }).click();
   await page.getByRole('tab', { name: 'Style', exact: true }).click();
   await page.getByRole('button', { name: 'Type on sticker', exact: true }).click();
-  await expect(page.getByRole('tab', { name: 'Text', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: 'Content', exact: true })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByLabel('Sticker text', { exact: true })).toBeFocused();
+});
+
+
+const SVG_LOGO = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80"><defs><linearGradient id="ink"><stop stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs><path fill="url(#ink)" fill-rule="evenodd" d="M10 10H110V70H10Z M40 25V55H80V25Z"/></svg>';
+async function uploadSvg(page, source = SVG_LOGO, name = 'brand-mark.svg') {
+  const [chooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.locator('label').filter({ has: page.getByLabel('Upload SVG logo', { exact: true }) }).click(),
+  ]);
+  await chooser.setFiles({ name, mimeType: 'image/svg+xml', buffer: Buffer.from(source) });
+}
+
+test('SVG logo renders and exports while preserving the original text', async ({ page }) => {
+  await page.getByLabel('Sticker text', { exact: true }).fill('MY ORIGINAL TEXT');
+  await uploadSvg(page);
+  await expect(page.getByRole('img', { name: /reading: brand-mark.svg$/ })).toBeAttached();
+  await expect(page.getByLabel('Type on the sticker', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('slider', { name: 'Logo size', exact: true })).toBeVisible();
+  await page.getByRole('tab', { name: 'Motion', exact: true }).click();
+  await page.getByText('Advanced motion', { exact: true }).click();
+  await expect(page.getByRole('slider', { name: 'Stretch', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: 'Change logo', exact: true }).click();
+  await expect(page.getByRole('tab', { name: 'Content', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByLabel('Upload SVG logo', { exact: true })).toBeFocused();
+  await page.waitForTimeout(300);
+  const [pngName, png] = await downloadFrom(page, () => page.getByRole('button', { name: 'PNG', exact: true }).click());
+  expect(pngName).toBe('sticker-brand-mark.png');
+  expect((await colourShares(page, png)).white).toBeGreaterThan(0.05);
+  const [svgName, svg] = await downloadFrom(page, () => page.getByRole('button', { name: 'SVG', exact: true }).click());
+  expect(svgName).toBe('sticker-brand-mark.svg');
+  const summary = await svgSummary(page, svg.toString('utf8'));
+  expect(summary.error).toBe(false);
+  expect(summary.groups.letters).toBeGreaterThan(0);
+  await page.getByRole('tab', { name: 'Content', exact: true }).click();
+  await page.getByRole('button', { name: 'Use text instead', exact: true }).click();
+  await expect(page.getByLabel('Sticker text', { exact: true })).toHaveValue('MY ORIGINAL TEXT');
+  await expect(page.getByRole('img', { name: /reading: MY ORIGINAL TEXT$/ })).toBeAttached();
+});
+
+test('SVG replacements work in marquee and wallpaper layouts', async ({ page }) => {
+  await uploadSvg(page);
+  await expect(page.getByRole('img', { name: /reading: brand-mark.svg$/ })).toBeAttached();
+  await page.getByRole('radio', { name: 'Marquee', exact: true }).click();
+  await expect(page.getByRole('img', { name: /Scrolling marquee reading: brand-mark.svg/ })).toBeAttached();
+  await page.waitForTimeout(300);
+  expect((await colourShares(page, await stageShot(page))).lime).toBeGreaterThan(0.1);
+  await page.getByRole('radio', { name: 'Wallpaper', exact: true }).click();
+  await uploadSvg(page, SVG_LOGO.replace('M10 10H110V70H10Z M40 25V55H80V25Z', 'M60 0L120 80H0Z'), 'triangle.svg');
+  await expect(page.getByRole('img', { name: /Wallpaper design reading: triangle.svg$/ })).toBeAttached();
+  await page.waitForTimeout(300);
+  expect((await colourShares(page, await stageShot(page))).red).toBeGreaterThan(0.03);
+});
+
+test('invalid SVG uploads keep the current logo and allow retrying', async ({ page }) => {
+  await uploadSvg(page);
+  await expect(page.getByRole('img', { name: /reading: brand-mark.svg$/ })).toBeAttached();
+  const invalid = [
+    ['not SVG', /not a valid SVG/],
+    ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>', /no visible shapes/],
+    ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><text x="0" y="9">A</text></svg>', /text to outlines/],
+    ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><image href="https://example.com/logo.png"/></svg>', /static vector SVG/],
+    ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="url(https://example.com/paint.svg)"/></svg>', /self-contained SVG/],
+  ];
+  for (const [source, message] of invalid) {
+    await uploadSvg(page, source, 'invalid.svg');
+    await expect(page.getByRole('alert')).toHaveText(message);
+    await expect(page.getByRole('img', { name: /reading: brand-mark.svg$/ })).toBeAttached();
+  }
+  await uploadSvg(page);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Use text instead', exact: true })).toBeVisible();
+});
+
+
+test('oval layout frames editable text and exports transparent PNG and SVG', async ({ page }) => {
+  await page.getByRole('radio', { name: 'Oval', exact: true }).click();
+  await page.getByLabel('Sticker text', { exact: true }).fill('BLK');
+  await pause(page);
+  await expect(page.getByRole('img', { name: 'Oval design reading: BLK', exact: true })).toBeAttached();
+  await page.getByRole('tab', { name: 'Export', exact: true }).click();
+  await page.getByRole('switch', { name: 'Transparent background', exact: true }).click();
+  const [name, png] = await downloadFrom(page, () => page.getByRole('button', { name: 'PNG', exact: true }).click());
+  expect(name).toBe('sticker-blk-oval.png');
+  expect(png.readUInt32BE(16) / png.readUInt32BE(20)).toBeGreaterThan(1.7);
+  const shares = await colourShares(page, png);
+  expect(shares.clear).toBeGreaterThan(0.1);
+  expect(shares.white).toBeGreaterThan(0.05);
+  expect(shares.red).toBeGreaterThan(0.05);
+  expect(shares.pink).toBeGreaterThan(0.01);
+  const [svgName, svg] = await downloadFrom(page, () => page.getByRole('button', { name: 'SVG', exact: true }).click());
+  expect(svgName).toBe('sticker-blk-oval.svg');
+  const summary = await svgSummary(page, svg.toString('utf8'));
+  expect(summary.error).toBe(false);
+  for (const group of ['letters', 'silhouette', 'stroke']) expect(summary.groups[group]).toBeGreaterThan(0);
+  await page.getByLabel('Type on the sticker', { exact: true }).click({ position: { x: 400, y: 350 } });
+  await page.keyboard.press('Control+A');
+  await page.keyboard.type('LIVE');
+  await expect(page.getByRole('img', { name: 'Oval design reading: LIVE', exact: true })).toBeAttached();
+});
+
+test('oval keeps its ring when empty and responds to frame controls', async ({ page }) => {
+  await page.getByRole('radio', { name: 'Oval', exact: true }).click();
+  await page.getByLabel('Sticker text', { exact: true }).fill('');
+  await page.getByLabel('Sticker text', { exact: true }).press('Escape');
+  await pause(page);
+  await expect(page.getByText('Type inside your oval', { exact: true })).toBeVisible();
+  await page.getByRole('tab', { name: 'Style', exact: true }).click();
+  await setRange(page, 'Ring thickness', 0.05);
+  await page.waitForTimeout(200);
+  const before = await colourShares(page, await stageShot(page));
+  expect(before.pink).toBeGreaterThan(0.005);
+  await setRange(page, 'Ring thickness', 0.3);
+  await page.waitForTimeout(200);
+  const after = await colourShares(page, await stageShot(page));
+  expect(after.white).toBeGreaterThan(before.white * 1.4);
+  await page.getByRole('radio', { name: 'Wide', exact: true }).click();
+  await expect(page.getByRole('radio', { name: 'Wide', exact: true })).toBeChecked();
+  await page.getByLabel('Type on the sticker', { exact: true }).click({ position: { x: 400, y: 350 } });
+  await page.keyboard.type('HELLO');
+  await expect(page.getByRole('img', { name: 'Oval design reading: HELLO', exact: true })).toBeAttached();
+});
+
+test('oval uses editable text and preserves a logo for other layouts', async ({ page }) => {
+  await page.getByLabel('Sticker text', { exact: true }).fill('MY NAME');
+  await uploadSvg(page);
+  await expect(page.getByRole('img', { name: /reading: brand-mark.svg$/ })).toBeAttached();
+  await page.getByRole('radio', { name: 'Oval', exact: true }).click();
+  await expect(page.getByRole('img', { name: 'Oval design reading: MY NAME', exact: true })).toBeAttached();
+  await expect(page.getByLabel('Sticker text', { exact: true })).toHaveValue('MY NAME');
+  await expect(page.getByLabel('Upload SVG logo', { exact: true })).toHaveCount(0);
+  await page.getByRole('radio', { name: 'Sticker', exact: true }).click();
+  await expect(page.getByRole('img', { name: /reading: brand-mark.svg$/ })).toBeAttached();
 });
