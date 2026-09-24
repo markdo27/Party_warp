@@ -23,6 +23,7 @@ silhouette with a pink outline, warped live on the GPU. The default reads
   Gentle, Liquid, or Wild motion presets; open advanced settings when you want finer control.
 - **Print textures.** Film grain, a halftone dot screen and ordered dithering.
 - **Type.** Archivo Black built in; upload your own TTF / OTF / WOFF / WOFF2.
+  The Marquee tagline has its own font picker, sharing uploaded fonts with the main text.
 - **Export.**
   - PNG: copy or download, opaque or transparent.
   - SVG: layered vectors for editing.

@@ -105,6 +105,14 @@ const FONT_CSS_HREF =
 /** The built-in sticker face. Uploaded fonts join it at runtime as `upload-<n>`. */
 export const DEFAULT_FONT = Object.freeze({ id: 'archivo', label: 'Archivo Black', family: 'Archivo Black' });
 const FONT_ID_RE = /^(archivo|upload-\d+)$/;
+
+/** The tagline's built-in face. Uploaded fonts can set the tagline too. */
+export const DEFAULT_TAG_FONT = Object.freeze({ id: 'archivo-tag', label: 'Archivo', family: 'Archivo', weight: 600 });
+const TAG_FONT_ID_RE = /^(archivo-tag|upload-\d+)$/;
+const TAG_FALLBACK_FONTS = '"Helvetica Neue", Arial, sans-serif';
+
+/** Canvas font shorthand for a tagline face at `px` pixels. */
+export const tagFontSpec = (font, px) => `${font.weight ?? 400} ${px}px "${font.family}", ${TAG_FALLBACK_FONTS}`;
 const FONT_EXTENSIONS = ['ttf', 'otf', 'woff', 'woff2'];
 const MAX_FONT_BYTES = 10 * 1024 * 1024;
 
@@ -131,7 +139,6 @@ export const DEFAULT_TAGLINE = '29 — 31\naugust 2026';
 // Wallpaper variation.
 const TILE_GAP_EM = 0.08;
 const TILE_ANGLE = -0.21; // wallpaper tilt (rad, ≈ -12°)
-const TAG_FONT = '600 {px}px "Archivo", "Helvetica Neue", Arial, sans-serif';
 
 export const PALETTES = [
   { id: 'disco', name: 'Disco', fill: '#ececec', sil: '#ff0000', line: '#ffc8f8', bg: '#000000' },
@@ -199,6 +206,7 @@ const MOTION_FPS = [30, 60];
 export const DEFAULTS = Object.freeze({
   design: 'sticker',
   fontId: 'archivo',
+  tagFontId: 'archivo-tag',
   caps: true,
   align: 'zigzag',
   fontSize: 150,
@@ -300,6 +308,7 @@ export function sanitizeParams(input = {}) {
     ...colors,
     ...flags,
     fontId: FONT_ID_RE.test(merged.fontId) ? merged.fontId : DEFAULTS.fontId,
+    tagFontId: TAG_FONT_ID_RE.test(merged.tagFontId) ? merged.tagFontId : DEFAULTS.tagFontId,
     align: oneOf('align', ALIGNS),
     design: oneOf('design', DESIGNS),
     bandTheme: oneOf('bandTheme', BAND_THEMES.map((t) => t.id)),
@@ -1450,28 +1459,52 @@ function rasterizeLogo(asset, maxSide) {
 }
 
 /**
- * The marquee's small print: plain Archivo, unwarped, as a distance field in sticker ems
- * so it stays crisp at any band size. Returns null when there is nothing to draw.
+ * Canvas box (em) around tagline lines: per-line ink metrics (em, baseline-relative, as
+ * measureText reports them) with baselines `lineGap` apart, plus `pad` all round.
  */
-function rasterizeTagline(canvas, lines, maxSide) {
+export function taglineExtent(lines, { lineGap, pad }) {
+  const x0 = Math.min(...lines.map((m) => -m.left)) - pad;
+  const x1 = Math.max(...lines.map((m) => m.right)) + pad;
+  const y0 = Math.min(...lines.map((m, i) => i * lineGap - m.ascent)) - pad;
+  const y1 = Math.max(...lines.map((m, i) => i * lineGap + m.descent)) + pad;
+  return { originEm: [x0, y0], sizeEm: [x1 - x0, y1 - y0] };
+}
+
+/**
+ * The small print beside the lockup (Archivo, or an uploaded face), unwarped, as a
+ * distance field in sticker ems so it stays crisp at any band size. The canvas is sized
+ * to the face's measured ink, so tall or wide uploads never clip. Returns null when there
+ * is nothing to draw.
+ */
+function rasterizeTagline(canvas, lines, maxSide, font = DEFAULT_TAG_FONT) {
   if (!lines.some((l) => l.trim() !== '')) return null;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) throw new Error('Canvas 2D is unavailable');
-  const lineGap = TAG_SCALE * 0.9;
-  const pad = 0.2;
-  ctx.font = TAG_FONT.replace('{px}', MEASURE_PX);
-  const widestEm = Math.max(...lines.map((l) => ctx.measureText(l).width)) / MEASURE_PX * TAG_SCALE;
-  const originEm = [-pad, -TAG_SCALE - pad];
-  const approxW = widestEm + 2 * pad;
-  const approxH = (lines.length - 1) * lineGap + TAG_SCALE * 1.35 + 2 * pad;
-  const pxPerEm = Math.min(TAG_PX_PER_EM, (maxSide - 2) / approxW, (maxSide - 2) / approxH);
-  const width = Math.ceil(approxW * pxPerEm);
-  const height = Math.ceil(approxH * pxPerEm);
+  ctx.font = tagFontSpec(font, MEASURE_PX);
+  const k = TAG_SCALE / MEASURE_PX;
+  const num = (v, fallback) => (Number.isFinite(v) ? v : fallback);
+  const metrics = lines.map((line) => {
+    const m = ctx.measureText(line);
+    return {
+      left: num(m.actualBoundingBoxLeft, 0) * k,
+      right: num(m.actualBoundingBoxRight, m.width) * k,
+      ascent: num(m.actualBoundingBoxAscent, MEASURE_PX * 0.8) * k,
+      descent: num(m.actualBoundingBoxDescent, MEASURE_PX * 0.25) * k,
+    };
+  });
+  // Line spacing follows the face (Archivo lands on 0.9 em), within sane bounds.
+  const probe = ctx.measureText('Hg');
+  const faceHeight = (probe.fontBoundingBoxAscent + probe.fontBoundingBoxDescent) / MEASURE_PX;
+  const lineGap = TAG_SCALE * (faceHeight > 0 ? clamp(0.83 * faceHeight, 0.7, 1.6) : 0.9);
+  const { originEm, sizeEm: approx } = taglineExtent(metrics, { lineGap, pad: 0.2 });
+  const pxPerEm = Math.min(TAG_PX_PER_EM, (maxSide - 2) / approx[0], (maxSide - 2) / approx[1]);
+  const width = Math.ceil(approx[0] * pxPerEm);
+  const height = Math.ceil(approx[1] * pxPerEm);
 
   canvas.width = width;
   canvas.height = height;
   ctx.clearRect(0, 0, width, height);
-  ctx.font = TAG_FONT.replace('{px}', TAG_SCALE * pxPerEm);
+  ctx.font = tagFontSpec(font, TAG_SCALE * pxPerEm);
   ctx.fillStyle = '#fff';
   ctx.textBaseline = 'alphabetic';
   lines.forEach((line, i) => ctx.fillText(line, -originEm[0] * pxPerEm, (i * lineGap - originEm[1]) * pxPerEm));
@@ -2665,6 +2698,77 @@ function onRadioGroupKeyDown(event, values, value, onChange) {
   event.currentTarget.querySelector(`[data-value="${CSS.escape(next)}"]`)?.focus();
 }
 
+/**
+ * Typeface list (built in + uploads) with an upload button. Passing `onRemove` adds a
+ * remove button per upload; only one picker should, so those buttons' labels stay unique.
+ */
+function FontPicker({ label, uploadLabel, options, value, onChange, onFiles, onRemove = null }) {
+  return (
+    <>
+      <div
+        role="radiogroup"
+        aria-label={label}
+        onKeyDown={(e) => onRadioGroupKeyDown(e, options.map((f) => f.id), value, onChange)}
+        className="space-y-1.5"
+      >
+        {options.map((f) => {
+          const active = value === f.id;
+          return (
+            <div key={f.id} className="flex items-stretch gap-1.5">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={active}
+                tabIndex={active ? 0 : -1}
+                data-value={f.id}
+                onClick={() => onChange(f.id)}
+                className={`min-w-0 flex-1 rounded-xl border px-3 py-2 text-left transition-colors ${focusRing} ${
+                  active ? 'border-[#ffc8f8]/70 bg-[#ffc8f8]/10' : 'border-white/10 bg-white/[0.03] hover:bg-white/[0.07]'
+                }`}
+              >
+                <span
+                  className="block truncate text-[16px] leading-tight"
+                  style={{ fontFamily: fontStackFor(f.family), fontWeight: f.weight ?? 400 }}
+                >
+                  {f.label}
+                </span>
+                <span className="rsw-mono mt-0.5 block text-[9.5px] uppercase tracking-wider text-white/55">
+                  {f.uploaded ? 'Uploaded' : 'Built in'}
+                </span>
+              </button>
+              {f.uploaded && onRemove && (
+                <button
+                  type="button"
+                  onClick={() => onRemove(f.id)}
+                  aria-label={`Remove ${f.label}`}
+                  className={`grid w-9 shrink-0 place-items-center rounded-xl border border-white/10 text-white/60 hover:bg-white/[0.07] hover:text-white ${focusRing}`}
+                >
+                  <X size={14} aria-hidden />
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-white/20 px-3 py-2.5 text-[12px] text-white/75 hover:bg-white/[0.06] hover:text-white focus-within:ring-2 focus-within:ring-[#ffc8f8]/60">
+        <FileUp size={14} aria-hidden />
+        Upload font
+        <span className="rsw-mono text-[10px] text-white/55">ttf · otf · woff</span>
+        <input
+          type="file"
+          accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2"
+          className="sr-only"
+          aria-label={uploadLabel}
+          onChange={(e) => {
+            onFiles(e.target.files);
+            e.target.value = ''; // allow picking the same file again
+          }}
+        />
+      </label>
+    </>
+  );
+}
+
 function Slider({ label, value, onChange, range, format, disabled = false }) {
   const id = useId();
   const pct = ((value - range.min) / (range.max - range.min)) * 100;
@@ -2877,6 +2981,9 @@ export default function RetroStickerWarp({
   const fieldLines = useMemo(() => (oneLine ? [bandLine(lines)] : lines), [oneLine, lines]);
   const fontOptions = useMemo(() => [DEFAULT_FONT, ...uploadedFonts], [uploadedFonts]);
   const fontEntry = fontOptions.find((f) => f.id === params.fontId) ?? DEFAULT_FONT;
+  const tagFontOptions = useMemo(() => [DEFAULT_TAG_FONT, ...uploadedFonts], [uploadedFonts]);
+  const tagFont = tagFontOptions.find((f) => f.id === params.tagFontId) ?? DEFAULT_TAG_FONT;
+  const tagReady = tagFontReady || Boolean(tagFont.uploaded); // uploads are loaded before they're listed
   const free = useMemo(() => computeFreeArea(stage, panelRect), [stage, panelRect]);
   const layout = useMemo(
     () => designLayout({ design, scene, tagBox: oneLine ? (tagScene?.inkBox ?? null) : null, params, stage, free }),
@@ -2993,13 +3100,13 @@ export default function RetroStickerWarp({
     };
   }, [fontFamily, fontUploaded, notify]);
 
-  // The marquee tagline's face, fetched the first time the variation is shown.
+  // The built-in tagline face, fetched the first time a tagline shows in it.
   useEffect(() => {
-    if (!oneLine || tagFontReady) return undefined;
+    if (!oneLine || tagReady) return undefined;
     let cancelled = false;
     const ready = () => !cancelled && setTagFontReady(true);
     const timer = setTimeout(ready, FONT_TIMEOUT_MS);
-    loadFontSpec(TAG_FONT.replace('{px}', 64), '0123456789 — augustjuly').then(() => {
+    loadFontSpec(tagFontSpec(DEFAULT_TAG_FONT, 64), '0123456789 — augustjuly').then(() => {
       clearTimeout(timer);
       ready();
     });
@@ -3007,7 +3114,7 @@ export default function RetroStickerWarp({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [oneLine, tagFontReady]);
+  }, [oneLine, tagReady]);
 
   // Uploaded faces live in the global FontFaceSet; release them with the component.
   useEffect(() => {
@@ -3095,11 +3202,11 @@ export default function RetroStickerWarp({
     notify,
   ]);
 
-  // The marquee tagline: plain small print, rebuilt only when its text changes.
+  // The tagline: plain small print, rebuilt only when its text or face changes.
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) return undefined;
-    if (!oneLine || !tagFontReady) {
+    if (!oneLine || !tagReady) {
       if (!oneLine) {
         renderer.setTag(null);
         setTagScene(null);
@@ -3109,7 +3216,7 @@ export default function RetroStickerWarp({
     const handle = requestAnimationFrame(() => {
       try {
         tagRasterRef.current ??= document.createElement('canvas');
-        const tag = rasterizeTagline(tagRasterRef.current, tagline.split('\n'), renderer.maxSize);
+        const tag = rasterizeTagline(tagRasterRef.current, tagline.split('\n'), renderer.maxSize, tagFont);
         renderer.setTag(tag);
         setTagScene(tag ? { inkBox: tag.inkBox } : null);
         dirtyRef.current = true;
@@ -3119,7 +3226,7 @@ export default function RetroStickerWarp({
       }
     });
     return () => cancelAnimationFrame(handle);
-  }, [oneLine, tagFontReady, tagline, rendererVersion, notify]);
+  }, [oneLine, tagReady, tagFont, tagline, rendererVersion, notify]);
 
   // Caret and selection in em; the render loop slides them along with the stretched letters.
   const caretEm = useMemo(() => {
@@ -3373,8 +3480,9 @@ export default function RetroStickerWarp({
     setPanelTab('Content');
   }, []);
 
+  // Uploads join one shared list; `target` is the setting the new face is applied to.
   const onFontFiles = useCallback(
-    async (files) => {
+    async (files, target = 'fontId') => {
       const file = files?.[0];
       if (!file) return;
       const problem = validateFontFile(file);
@@ -3385,8 +3493,8 @@ export default function RetroStickerWarp({
       try {
         const font = await registerUploadedFont(file);
         setUploadedFonts((prev) => [...prev, font]);
-        update('fontId', font.id);
-        notify('success', `Using “${font.label}”`);
+        update(target, font.id);
+        notify('success', target === 'tagFontId' ? `Tagline uses “${font.label}”` : `Using “${font.label}”`);
       } catch (err) {
         console.error('[RetroStickerWarp] font upload failed', err);
         notify('error', 'Couldn’t read that font file.');
@@ -3402,8 +3510,9 @@ export default function RetroStickerWarp({
       document.fonts.delete(font.face);
       setUploadedFonts((prev) => prev.filter((f) => f.id !== id));
       if (params.fontId === id) update('fontId', DEFAULT_FONT.id);
+      if (params.tagFontId === id) update('tagFontId', DEFAULT_TAG_FONT.id);
     },
-    [uploadedFonts, params.fontId, update],
+    [uploadedFonts, params.fontId, params.tagFontId, update],
   );
 
   const onDragOver = useCallback((event) => {
@@ -3959,7 +4068,19 @@ export default function RetroStickerWarp({
                     spellCheck={false}
                     placeholder="Dates, place…"
                     className="block w-full resize-none rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[13px] leading-snug text-white placeholder:text-white/30 focus:border-[#ffc8f8]/60 focus:outline-none"
+                    style={{ fontFamily: fontStackFor(tagFont.family), fontWeight: tagFont.weight ?? 400 }}
                   />
+                  <p className="mb-1.5 mt-3 text-[12px] text-white/70">Tagline typeface</p>
+                  <div className="space-y-1.5">
+                    <FontPicker
+                      label="Tagline typeface"
+                      uploadLabel="Upload a tagline font file"
+                      options={tagFontOptions}
+                      value={tagFont.id}
+                      onChange={(id) => update('tagFontId', id)}
+                      onFiles={(files) => onFontFiles(files, 'tagFontId')}
+                    />
+                  </div>
                 </div>
               )}
               {!logo && (
@@ -3991,63 +4112,15 @@ export default function RetroStickerWarp({
             </Section>
 
             {!logo && <Section icon={Type} title="Advanced type" defaultOpen={false}>
-              <div
-                role="radiogroup"
-                aria-label="Typeface"
-                onKeyDown={(e) => onRadioGroupKeyDown(e, fontOptions.map((f) => f.id), fontEntry.id, (id) => update('fontId', id))}
-                className="space-y-1.5"
-              >
-                {fontOptions.map((f) => {
-                  const active = fontEntry.id === f.id;
-                  return (
-                    <div key={f.id} className="flex items-stretch gap-1.5">
-                      <button
-                        type="button"
-                        role="radio"
-                        aria-checked={active}
-                        tabIndex={active ? 0 : -1}
-                        data-value={f.id}
-                        onClick={() => update('fontId', f.id)}
-                        className={`min-w-0 flex-1 rounded-xl border px-3 py-2 text-left transition-colors ${focusRing} ${
-                          active ? 'border-[#ffc8f8]/70 bg-[#ffc8f8]/10' : 'border-white/10 bg-white/[0.03] hover:bg-white/[0.07]'
-                        }`}
-                      >
-                        <span className="block truncate text-[16px] leading-tight" style={{ fontFamily: fontStackFor(f.family) }}>
-                          {f.label}
-                        </span>
-                        <span className="rsw-mono mt-0.5 block text-[9.5px] uppercase tracking-wider text-white/55">
-                          {f.uploaded ? 'Uploaded' : 'Built in'}
-                        </span>
-                      </button>
-                      {f.uploaded && (
-                        <button
-                          type="button"
-                          onClick={() => removeFont(f.id)}
-                          aria-label={`Remove ${f.label}`}
-                          className={`grid w-9 shrink-0 place-items-center rounded-xl border border-white/10 text-white/60 hover:bg-white/[0.07] hover:text-white ${focusRing}`}
-                        >
-                          <X size={14} aria-hidden />
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-white/20 px-3 py-2.5 text-[12px] text-white/75 hover:bg-white/[0.06] hover:text-white focus-within:ring-2 focus-within:ring-[#ffc8f8]/60">
-                <FileUp size={14} aria-hidden />
-                Upload font
-                <span className="rsw-mono text-[10px] text-white/55">ttf · otf · woff</span>
-                <input
-                  type="file"
-                  accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2"
-                  className="sr-only"
-                  aria-label="Upload a font file"
-                  onChange={(e) => {
-                    onFontFiles(e.target.files);
-                    e.target.value = ''; // allow picking the same file again
-                  }}
-                />
-              </label>
+              <FontPicker
+                label="Typeface"
+                uploadLabel="Upload a font file"
+                options={fontOptions}
+                value={fontEntry.id}
+                onChange={(id) => update('fontId', id)}
+                onFiles={(files) => onFontFiles(files, 'fontId')}
+                onRemove={removeFont}
+              />
               {!oneLine && (
                 <Slider label="Line spacing" value={params.lineSpacing} range={RANGES.lineSpacing} format={fmt.times} onChange={(v) => update('lineSpacing', v)} />
               )}

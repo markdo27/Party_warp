@@ -3,6 +3,7 @@ import {
   BAND_GAP_EM,
   BAND_THEMES,
   DEFAULTS,
+  DEFAULT_TAG_FONT,
   DESIGNS,
   FAR_PX,
   FIELD_LIMIT_EM,
@@ -67,6 +68,8 @@ import {
   stretchBreaks,
   stretchBumps,
   stretchScales,
+  tagFontSpec,
+  taglineExtent,
   textureUniforms,
   traceContours,
   unionField,
@@ -383,6 +386,34 @@ describe('silhouetteField', () => {
     for (let y = 36; y <= 123; y++) for (let x = 36; x <= 123; x++) alpha[y * w + x] = 0;
     const sil = silhouetteField(sdfOf(alpha, w, h), w, h, pxPerEm);
     expect(sampleEm(sil, 80, 80)).toBeLessThan(0);
+  });
+});
+
+describe('tagline typeface', () => {
+  it('defaults to the built-in Archivo and accepts uploaded fonts', () => {
+    expect(sanitizeParams().tagFontId).toBe(DEFAULT_TAG_FONT.id);
+    expect(sanitizeParams({ tagFontId: 'upload-3' }).tagFontId).toBe('upload-3');
+    expect(sanitizeParams({ tagFontId: 'comic-sans' }).tagFontId).toBe(DEFAULT_TAG_FONT.id);
+    expect(sanitizeParams({ tagFontId: 'archivo' }).tagFontId).toBe(DEFAULT_TAG_FONT.id);
+  });
+
+  it('builds a canvas font for the built-in face and for uploads', () => {
+    expect(tagFontSpec(DEFAULT_TAG_FONT, 20)).toMatch(/^600 20px "Archivo", /);
+    expect(tagFontSpec({ family: 'RSW Upload 2' }, 12.5)).toMatch(/^400 12.5px "RSW Upload 2", /);
+  });
+
+  it('sizes the tagline canvas to the measured ink of any font, with padding', () => {
+    const lines = [
+      { left: 0.1, right: 3, ascent: 0.7, descent: 0.2 },
+      { left: 0, right: 4.5, ascent: 1.3, descent: 0.6 }, // a tall display face
+    ];
+    const { originEm, sizeEm } = taglineExtent(lines, { lineGap: 1, pad: 0.2 });
+    expect(originEm[0]).toBeCloseTo(-0.3, 9); // widest left overhang + pad
+    expect(originEm[1]).toBeCloseTo(-0.9, 9); // first line's ascent + pad
+    expect(originEm[0] + sizeEm[0]).toBeCloseTo(4.7, 9);
+    expect(originEm[1] + sizeEm[1]).toBeCloseTo(1.8, 9); // second baseline (1) + descent + pad
+    // The second line's tall ascent reaches above its baseline but not above the canvas.
+    expect(1 - 1.3).toBeGreaterThanOrEqual(originEm[1]);
   });
 });
 
