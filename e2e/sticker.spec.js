@@ -823,3 +823,20 @@ test('melts from one message into the next', async ({ page }) => {
   expect(first).toBeGreaterThan(50);
   expect(second).toBeGreaterThan(first * 1.3); // BLK46 is wider than BLK
 });
+
+test('letters keep stretching while a message holds in a message loop', async ({ page }) => {
+  await freezeWarp(page);
+  await setRange(page, 'Letter tilt', 0);
+  await setRange(page, 'Stretch', 0);
+  await page.getByRole('switch', { name: 'Melt between messages' }).click();
+  await page.getByLabel('Sticker text').fill('BLK');
+  await page.getByPlaceholder('Type the next message…').fill('BLK46');
+  await setRange(page, 'Hold each message', 8);
+  await expect(page.getByLabel('Stretch', { exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Play from start' }).click();
+  await page.waitForTimeout(1000);
+  expect(await changeOver(page)).toBeLessThan(20); // at rest with no stretch
+  await setRange(page, 'Stretch', 1);
+  await page.waitForTimeout(300);
+  expect(await changeOver(page)).toBeGreaterThan(300); // letters extend and condense
+});

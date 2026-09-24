@@ -1539,13 +1539,39 @@ function rasterizeTagline(canvas, lines, maxSide, font = DEFAULT_TAG_FONT) {
 let fontCssPromise = null;
 let uploadCounter = 0;
 
-/** A readable hold followed by a smooth loop to the next message. */
-function messageFrame(seconds, count, hold, melt) {
+const MESSAGE_SETTLE_S = 0.4; // letters ease into and out of stretch and tilt around each melt
+
+/**
+ * A readable hold followed by a smooth loop to the next message. `alive` (0–1) scales the
+ * letter stretch and tilt: it eases in after a melt and out before the next one, so letters
+ * move while a message holds and rest while it melts, and shared text lines up exactly.
+ */
+export function messageFrame(seconds, count, hold, melt) {
   const duration = hold + melt;
   const slot = Math.max(0, seconds) / duration;
   const index = Math.floor(slot) % count;
-  const progress = clamp(((slot % 1) * duration - hold) / melt, 0, 1);
-  return { index, next: (index + 1) % count, mix: progress };
+  const inSlot = (slot % 1) * duration;
+  const progress = clamp((inSlot - hold) / melt, 0, 1);
+  const ramp = Math.min(MESSAGE_SETTLE_S, hold / 3);
+  const alive = inSlot >= hold ? 0 : smoothstep(0, ramp, inSlot) * (1 - smoothstep(hold - ramp, hold, inSlot));
+  return { index, next: (index + 1) % count, mix: progress, alive };
+}
+
+/**
+ * A message's layout moved into its own field, which is centred on the message's ink: the
+ * rows the stretch and tilt act on, the field's x range and the row geometry.
+ */
+export function messageLayout(base) {
+  const b = base.inkBox;
+  const [cx, cy] = [b.x + b.width / 2, b.y + b.height / 2];
+  const rows = base.layout.rows.map((r) => ({ ...r, x: r.x - cx, baseline: r.baseline - cy }));
+  const { capHeight, gap } = base.layout;
+  return {
+    layout: { ...base.layout, rows },
+    fieldOrigin: [base.originEm[0] - cx, base.originEm[1] - cy],
+    fieldSize: base.sizeEm,
+    rowGeom: [rows[0].baseline - capHeight / 2, gap],
+  };
 }
 
 /**
@@ -1628,17 +1654,9 @@ export function messagePlan(from, to) {
 
 /** Full ink distances avoid gaps when morphing between unrelated letter shapes. */
 function messageField(base, goo) {
+  // The four letter classes stay separate, so letters can stretch and lean one by one while
+  // the message holds; the shader merges them (with goo) while it melts.
   const data = buildFieldData(base, goo);
-  const { gooK, gooRowK } = effectUniforms({ ...DEFAULTS, goo });
-  const union = (a, b, k) => Math.min(a, b) - Math.pow(Math.max(k - Math.abs(a - b), 0), 2) / Math.max(4 * k, 1e-5);
-  const alpha = new Uint8Array(base.width * base.height);
-  for (let i = 0; i < alpha.length; i++) {
-    const j = i * 4;
-    const d = union(union(data.glyphs[j], data.glyphs[j + 1], gooK), union(data.glyphs[j + 2], data.glyphs[j + 3], gooK), gooRowK);
-    alpha[i] = Math.round(clamp(0.5 - d * base.pxPerEm, 0, 1) * 255);
-  }
-  const distances = signedDistanceField(alpha, base.width, base.height);
-  for (let i = 0; i < distances.length; i++) data.glyphs[i * 4] = distances[i] / base.pxPerEm;
   const b = base.inkBox;
   const originEm = [base.originEm[0] - b.x - b.width / 2, base.originEm[1] - b.y - b.height / 2];
   return {
@@ -1983,6 +2001,12 @@ float roundBox(vec2 p, vec2 halfSize) {
   return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
 }
 
+// A message's letters merged into one shape, gooey like the sticker (letters at rest).
+float messageInk(sampler2D field, vec2 uv) {
+  vec4 f = textureLod(field, uv, 0.0);
+  return smin(smin(f.r, f.g, uGooK, 1.0), smin(f.b, f.a, uGooK, 1.0), uGooRowK, 1.0);
+}
+
 // Body distance that stays meaningful outside its texture: the edge value plus the
 // distance to the texture's box, so growing into new ground stays gradual.
 float bodyDist(sampler2D tex, vec2 p, vec2 origin, vec2 size) {
@@ -1996,13 +2020,14 @@ float bodyDist(sampler2D tex, vec2 p, vec2 origin, vec2 size) {
 // lanes running ahead, so different letters never overlap. The backing grows out into the
 // new shape before the pour and retracts after the drain, and the pair glides so the new
 // message ends centred. Every front starts above and ends below all visible ink.
-vec2 messageAt(vec2 w) {
+vec2 messageAt(vec2 w, float t) {
   float m = uMessageMix;
-  float wet = sin(3.14159265 * m);
+  // Holding: the message is drawn like any sticker, letters stretching and leaning.
+  if (m <= 0.0) return vec2(glyphAt(w, LOCKUP, 0.0, t), texture(uBody, (vec2(bodyX(w, LOCKUP), w.y) - uOrigin) / uBodySize).r);
   vec2 po = w + uMessageAlign * smoothstep(0.1, 0.9, m); // old message coordinates
   vec2 pn = po - uMessageAlign;                           // new message coordinates
-  float oldInk = texture(uField, (po - uOrigin) / uSize).r;
-  float newInk = texture(uNextField, (pn - uNextOrigin) / uNextSize).r;
+  float oldInk = messageInk(uField, (po - uOrigin) / uSize);
+  float newInk = messageInk(uNextField, (pn - uNextOrigin) / uNextSize);
 
   float lane = 0.5 + 0.5 * sin(w.x * 8.3 + 1.6 * sin(w.x * 2.7));
   float drip = lane * lane * lane * lane;
@@ -2024,8 +2049,8 @@ vec2 messageAt(vec2 w) {
   float sag = 0.2 * (0.3 + drip) * sin(3.14159265 * draining) * smoothstep(0.45, 0.0, w.y - drainFront);
   vec2 lift = vec2(0.0, sag);
   // Exactly the old ink the shared part doesn't claim, so together they are the old message.
-  float oldOnly = max(texture(uField, (po - lift - uOrigin) / uSize).r,
-                      min(slack - texture(uNextField, (pn - lift - uNextOrigin) / uNextSize).r,
+  float oldOnly = max(messageInk(uField, (po - lift - uOrigin) / uSize),
+                      min(slack - messageInk(uNextField, (pn - lift - uNextOrigin) / uNextSize),
                           0.08 - roundBox(po - lift - runCentre, runHalf)));
   // Leaving ink thins a touch as it starts to drain, so any leftover rim can't linger.
   float leaving = smax(oldOnly + 0.02 * smoothstep(0.0, 0.2, draining), drainFront - w.y, 0.05);
@@ -2048,7 +2073,7 @@ vec2 messageAt(vec2 w) {
 
 // Glyph distance (per-letter stretch + lean) and silhouette distance (stretch only) at w.
 vec2 fieldAt(vec2 w, float row, float pivot, float t) {
-  if (uMessageOn > 0.5) return messageAt(w);
+  if (uMessageOn > 0.5) return messageAt(w, t);
   float glyph = glyphAt(w, row, pivot, t);
   float body = texture(uBody, (vec2(bodyX(w, row), w.y) - uOrigin) / uBodySize).r;
   return vec2(glyph, body);
@@ -2816,6 +2841,25 @@ function computeStretchFrame(scene, params, time, rowCount, cache) {
 }
 
 /**
+ * Stretch + tilt for this frame. In a message loop they act on the message being held,
+ * scaled by its `alive` envelope, and rest (null) while it melts.
+ */
+function stretchForFrame(live, clock, cache) {
+  const message = messageFor(live, clock);
+  if (!message) return computeStretchFrame(live.scene, live.params, clock.shown, live.layout?.rows ?? 1, cache);
+  const layout = live.scene.messages?.[message.index];
+  if (!layout || message.alive <= 0) return null;
+  const params = { ...live.params, stretch: live.params.stretch * message.alive, italic: live.params.italic * message.alive };
+  const stretch = computeStretchFrame({ ...layout, empty: false }, params, clock.shown, 1, cache);
+  return stretch && { ...stretch, rowGeom: layout.rowGeom };
+}
+
+const messageFor = (live, clock) =>
+  live.params.design === 'sticker' && live.params.messageLoop && live.scene?.isSequence
+    ? messageFrame(clock.messages ?? 0, live.scene.messageCount, live.params.messageHold, live.params.messageMelt)
+    : null;
+
+/**
  * Shader inputs for the live view. `clock.shown` is the pose on screen: it tracks
  * `clock.time` in smooth mode but only advances on boil steps, so unrelated re-renders
  * never draw in-between poses. Scroll offsets wrap on each design's own period.
@@ -2828,7 +2872,7 @@ function frameFromLive(live, clock, stretch) {
     width: Math.max(1, Math.round(stage.width * dpr)),
     height: Math.max(1, Math.round(stage.height * dpr)),
     time: foldTime(clock.shown),
-    message: p.design === 'sticker' && p.messageLoop && live.scene?.isSequence ? messageFrame(clock.messages ?? 0, live.scene.messageCount, p.messageHold, p.messageMelt) : null,
+    message: messageFor(live, clock),
     seed: clock.seed,
     boil: p.boil ? 1 : 0,
     ...effectUniforms(p),
@@ -2844,7 +2888,7 @@ function frameFromLive(live, clock, stretch) {
       centerEm: view.centerEm,
     },
     warpDomain: L?.warpDomain ?? null,
-    stretch: stretch && { domain: stretch.domain, rowGeom: live.rowGeom },
+    stretch: stretch && { domain: stretch.domain, rowGeom: stretch.rowGeom ?? live.rowGeom },
     focus: L?.focus,
     oval: L?.oval,
     ovalRing: p.ovalRing,
@@ -3430,6 +3474,7 @@ export default function RetroStickerWarp({
             const glideX = Math.max(...aligns.map(([dx]) => Math.abs(dx)));
             const glideY = Math.max(...aligns.map(([, dy]) => Math.abs(dy)));
             setScene({ empty: false, layout: bases[0].layout, isSequence: true, messageCount: bases.length,
+              messages: bases.map(messageLayout),
               inkBox: { x: -width / 2, y: -height / 2, width, height },
               fieldOrigin: [-width / 2 - glideX - FIELD_PAD_EM, -height / 2 - glideY - FIELD_PAD_EM],
               fieldSize: [width + 2 * (glideX + FIELD_PAD_EM), height + 2 * (glideY + FIELD_PAD_EM)] });
@@ -3604,7 +3649,7 @@ export default function RetroStickerWarp({
       dirtyRef.current = false;
       try {
         const clock = clockRef.current;
-        const stretch = computeStretchFrame(live.scene, live.params, clock.shown, live.layout?.rows ?? 1, stretchCacheRef.current);
+        const stretch = stretchForFrame(live, clock, stretchCacheRef.current);
         if (stretch) renderer.setStretch(stretch);
         stretchRef.current = stretch;
         renderer.render(frameFromLive(live, clock, stretch));
@@ -4020,7 +4065,7 @@ export default function RetroStickerWarp({
       const renderPixels = (i) => {
         const mc = motionClock(i, fps, live.params);
         const clock = { ...start, shown: start.shown + mc.time, shownScroll: start.shownScroll + mc.scroll, seed: mc.seed, messages: (start.messages ?? 0) + i / fps };
-        const stretch = computeStretchFrame(live.scene, live.params, clock.shown, live.layout.rows, cache);
+        const stretch = stretchForFrame(live, clock, cache);
         if (stretch) renderer.setStretch(stretch);
         return renderer.readPixels(frameAt(clock, stretch, alpha));
       };
@@ -4623,12 +4668,12 @@ export default function RetroStickerWarp({
               <Slider label="Speed" value={params.speed} range={RANGES.speed} format={fmt.times} onChange={(v) => update('speed', v)} />
               <Slider label="Wobble" value={params.intensity} range={RANGES.intensity} format={fmt.pct} onChange={(v) => update('intensity', v)} />
               <Advanced title="Advanced motion">
-              {sequenceActive && <p className="text-[11px] leading-relaxed text-white/55">Only the letters that change melt; shared letters stay put. Letter stretch and tilt are paused during the sequence.</p>}
+              {sequenceActive && <p className="text-[11px] leading-relaxed text-white/55">Only the letters that change melt; shared letters stay put. Letters stretch and tilt while each message holds, then settle for the melt.</p>}
               {logo && <p className="text-[11px] leading-relaxed text-white/55">Logos move as one shape. Letter stretch and tilt apply to text only.</p>}
               <Slider label="Wave detail" value={params.frequency} range={RANGES.frequency} format={fmt.times} onChange={(v) => update('frequency', v)} />
               <Slider label="Breathing" value={params.swell} range={RANGES.swell} format={fmt.pct} onChange={(v) => update('swell', v)} />
-              <Slider label="Stretch" disabled={Boolean(logo) || sequenceActive} value={params.stretch} range={RANGES.stretch} format={fmt.pct} onChange={(v) => update('stretch', v)} />
-              <Slider label="Letter tilt" disabled={Boolean(logo) || sequenceActive} value={params.italic} range={RANGES.italic} format={fmt.pct} onChange={(v) => update('italic', v)} />
+              <Slider label="Stretch" disabled={Boolean(logo)} value={params.stretch} range={RANGES.stretch} format={fmt.pct} onChange={(v) => update('stretch', v)} />
+              <Slider label="Letter tilt" disabled={Boolean(logo)} value={params.italic} range={RANGES.italic} format={fmt.pct} onChange={(v) => update('italic', v)} />
               {!isSticker && (
                 <Slider
                   label="Scroll"

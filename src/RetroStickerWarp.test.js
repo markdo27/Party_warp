@@ -51,6 +51,8 @@ import {
   loopsToPath,
   mapBreaks,
   messageAlignment,
+  messageFrame,
+  messageLayout,
   messagePlan,
   messageTiming,
   motionClock,
@@ -417,6 +419,47 @@ describe('tagline typeface', () => {
     expect(originEm[1] + sizeEm[1]).toBeCloseTo(1.8, 9); // second baseline (1) + descent + pad
     // The second line's tall ascent reaches above its baseline but not above the canvas.
     expect(1 - 1.3).toBeGreaterThanOrEqual(originEm[1]);
+  });
+});
+
+describe('messageFrame', () => {
+  // Two messages, each held 2 s then melted for 1 s.
+  const at = (t) => messageFrame(t, 2, 2, 1);
+
+  it('holds each message, then melts into the next and loops', () => {
+    expect(at(1)).toMatchObject({ index: 0, next: 1, mix: 0 });
+    expect(at(2.5).mix).toBeCloseTo(0.5, 9);
+    expect(at(4)).toMatchObject({ index: 1, next: 0, mix: 0 });
+    expect(at(6.2).index).toBe(0); // back to the first message
+  });
+
+  it('lets letters stretch and lean only while a message holds', () => {
+    expect(at(0).alive).toBe(0); // just melted in: at rest
+    expect(at(1).alive).toBe(1); // mid-hold: fully alive
+    expect(at(1.999).alive).toBeLessThan(0.01); // settled before the melt
+    expect(at(2.5).alive).toBe(0); // melting: at rest, so shared text lines up
+    expect(at(0.2).alive).toBeGreaterThan(0);
+    expect(at(0.2).alive).toBeLessThan(1);
+    // Short holds still get a full ease in and out.
+    expect(messageFrame(0.25, 2, 0.5, 1).alive).toBeGreaterThan(0.9);
+  });
+});
+
+describe('messageLayout', () => {
+  it('moves the rows into the message field, centred on its ink', () => {
+    const base = {
+      layout: { rows: [{ x: 2, baseline: 1, chars: ['A'], stops: [0, 1] }], capHeight: 0.7, gap: 0.8 },
+      inkBox: { x: 2, y: 0.3, width: 1, height: 0.7 },
+      originEm: [1, -0.5],
+      sizeEm: [3, 2],
+    };
+    const m = messageLayout(base);
+    expect(m.layout.rows[0].x).toBeCloseTo(-0.5, 9); // ink centre x = 2.5
+    expect(m.layout.rows[0].baseline).toBeCloseTo(0.35, 9); // ink centre y = 0.65
+    expect(m.fieldOrigin).toEqual([-1.5, -1.15]);
+    expect(m.fieldSize).toEqual([3, 2]);
+    expect(m.rowGeom[0]).toBeCloseTo(0.35 - 0.35, 9);
+    expect(m.rowGeom[1]).toBe(0.8);
   });
 });
 

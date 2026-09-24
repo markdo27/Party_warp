@@ -14,7 +14,8 @@ silhouette with a pink outline, warped live on the GPU. The default reads
   messages share stay put (BLK → BLK46 keeps BLK still), the old letters drain away top to
   bottom and the new ones pour in behind them, while the backing grows or shrinks to fit.
   Blank messages are skipped. Pause freezes the transition, and animation exports can include
-  the full loop. This mode uses text, with per-letter stretch and tilt paused.
+  the full loop. Letters keep stretching and tilting while each message holds, and settle
+  for the melt so shared letters line up.
 - **SVG logos.** Upload or drop a static SVG (up to 2 MB) to use its shape with the editor’s
   colours and goo effect in Sticker, Marquee, or Wallpaper. Replace it or return to your saved text. Convert
   lettering to outlines; linked images, fonts, filters, and animations are unsupported.
