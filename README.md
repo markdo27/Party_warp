@@ -13,8 +13,9 @@ silhouette with a pink outline, warped live on the GPU. The default reads
   stop-motion "boil" mode at 4–15 fps.
 - **Letters with a life of their own.** Random letters stretch like extended cuts while
   others lean into italics, one letter at a time.
-- **Designs.** Sticker, Marquee (scrolling colour bands with a tagline), Badge (a ring),
-  Ribbon (crossing tapes) and Wallpaper (tilted tiling).
+- **Designs.** Sticker, Marquee (scrolling colour bands with a tagline), and Wallpaper (tilted tiling).
+- **Beginner controls.** Four tabs guide you through Text, Style, Motion, and Export. Start with
+  Gentle, Liquid, or Wild motion presets; open advanced settings when you want finer control.
 - **Print textures.** Film grain, a halftone dot screen and ordered dithering.
 - **Type.** Archivo Black built in; upload your own TTF / OTF / WOFF / WOFF2.
 - **Export.**

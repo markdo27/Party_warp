@@ -13,7 +13,6 @@ import {
   RANGES,
   TIME_FOLD,
   alignOffset,
-  badgeGeometry,
   bandGeometry,
   bandLine,
   boxSizesForGauss,
@@ -54,7 +53,6 @@ import {
   noise1,
   pickVideoType,
   randomPalette,
-  ribbonGeometry,
   rowColToCaret,
   sanitizeInput,
   sanitizeParams,
@@ -840,27 +838,11 @@ describe('zip writer', () => {
   });
 });
 
-describe('design geometry', () => {
-  it('sizes the badge ring to whole repeats around the tagline', () => {
-    const g = badgeGeometry(3, 1, { width: 2, height: 1 });
-    expect(g.repeats).toBeGreaterThanOrEqual(2);
-    expect(g.radius).toBeCloseTo((g.repeats * 3) / (2 * Math.PI), 9);
-    expect(g.radius - 0.5).toBeGreaterThanOrEqual(Math.hypot(1, 0.5));
-    expect(g.outer).toBeCloseTo(g.radius + 0.5, 9);
-  });
-
-  it('keeps ribbons inside the free area', () => {
-    const [a, b] = ribbonGeometry({ width: 20, height: 12 }, { x: 0, y: 1, width: 20, height: 10 }, 1.5);
-    [a, b].forEach((r) => {
-      expect(Math.abs(r.amp) + 0.75).toBeLessThanOrEqual(5 + 1e-9);
-      expect(r.cy).toBeCloseTo(6, 9);
-      expect(r.k).toBeGreaterThan(0);
-    });
-    expect(Math.sign(a.amp)).not.toBe(Math.sign(b.amp));
-  });
-});
-
 describe('designLayout', () => {
+  it('falls back to a sticker for removed layouts in saved settings', () => {
+    for (const design of ['badge', 'ribbon']) expect(sanitizeParams({ design }).design).toBe('sticker');
+  });
+
   const scene = {
     empty: false,
     inkBox: { x: -2, y: -0.7, width: 4, height: 0.7 },
@@ -882,10 +864,6 @@ describe('designLayout', () => {
     });
   });
 
-  it('fits the whole badge inside the free area', () => {
-    const L = layoutFor('badge');
-    expect(2 * L.badge.outer * L.view.pxPerEm).toBeLessThanOrEqual(Math.min(free.width, free.height));
-  });
 
   it('alternates wallpaper colourways and swaps fill with silhouette', () => {
     const L = layoutFor('wallpaper');

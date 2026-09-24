@@ -93,8 +93,8 @@ const pause = (page) => page.getByRole('button', { name: 'Pause', exact: true })
 
 /** Freezes the warp and grain so any change between frames can only come from stretch or scroll. */
 async function freezeWarp(page) {
-  await setRange(page, 'Intensity', 0);
-  await setRange(page, 'Swell', 0);
+  await setRange(page, 'Wobble', 0);
+  await setRange(page, 'Breathing', 0);
   await setRange(page, 'Grain', 0);
 }
 
@@ -242,13 +242,14 @@ test('clearing the text shows the empty state', async ({ page }) => {
 test('silhouette slider grows the red body', async ({ page }) => {
   await pause(page);
   const before = await colourShares(page, await stageShot(page));
-  await setRange(page, 'Silhouette', 0.4);
+  await setRange(page, 'Background padding', 0.4);
   await page.waitForTimeout(150);
   const after = await colourShares(page, await stageShot(page));
   expect(after.red).toBeGreaterThan(before.red * 1.2);
 });
 
 test('downloads opaque and transparent PNG snapshots', async ({ page }) => {
+  await page.getByRole('tab', { name: 'Export', exact: true }).click();
   for (const transparent of [false, true]) {
     if (transparent) await page.getByRole('switch', { name: 'Transparent background' }).click();
     const [download] = await Promise.all([
@@ -280,6 +281,8 @@ test('turns the sticker body and outline off and on', async ({ page }) => {
   await expect(toggle).toHaveAttribute('aria-pressed', 'true');
   await toggle.click();
   await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  await page.getByRole('tab', { name: 'Style', exact: true }).click();
+  await page.getByText('Outline settings', { exact: true }).click();
   await expect(page.getByRole('switch', { name: 'Sticker body & outline' })).toHaveAttribute('aria-checked', 'false');
   await page.waitForTimeout(150);
   const off = await colourShares(page, await stageShot(page));
@@ -293,7 +296,7 @@ test('turns the sticker body and outline off and on', async ({ page }) => {
 
 test('letters stretch over time only when Stretch is on', async ({ page }) => {
   await freezeWarp(page);
-  await setRange(page, 'Italic', 0);
+  await setRange(page, 'Letter tilt', 0);
   await setRange(page, 'Stretch', 0);
   await page.waitForTimeout(200);
   expect(await changeOver(page)).toBeLessThan(20);
@@ -303,6 +306,7 @@ test('letters stretch over time only when Stretch is on', async ({ page }) => {
 });
 
 test('ships Archivo Black only and accepts uploaded fonts', async ({ page }) => {
+  await page.getByRole('button', { name: 'Advanced type', exact: true }).click();
   const typefaces = page.getByRole('radiogroup', { name: 'Typeface' }).getByRole('radio');
   await expect(typefaces).toHaveCount(1);
   await expect(typefaces.first()).toHaveAccessibleName(/Archivo Black/);
@@ -338,7 +342,7 @@ test('marquee variation tiles scrolling bands with a tagline', async ({ page }) 
   // With warp, stretch and italic frozen, frames still differ because the bands scroll.
   await freezeWarp(page);
   await setRange(page, 'Stretch', 0);
-  await setRange(page, 'Italic', 0);
+  await setRange(page, 'Letter tilt', 0);
   await page.waitForTimeout(200);
   expect(await changeOver(page, 500)).toBeGreaterThan(500);
   await setRange(page, 'Scroll', 0);
@@ -362,6 +366,7 @@ test('marquee exports the whole poster at 2×', async ({ page }) => {
 
 /** Downloads whatever `click` triggers and returns [suggested filename, bytes]. */
 async function downloadFrom(page, click) {
+  await page.getByRole('tab', { name: 'Export', exact: true }).click();
   const [download] = await Promise.all([page.waitForEvent('download', { timeout: 60_000 }), click()]);
   return [download.suggestedFilename(), await readFile(await download.path())];
 }
@@ -380,10 +385,10 @@ const svgSummary = (page, svg) =>
 test('letters lean into random italics when Italic is on', async ({ page }) => {
   await freezeWarp(page);
   await setRange(page, 'Stretch', 0);
-  await setRange(page, 'Italic', 0);
+  await setRange(page, 'Letter tilt', 0);
   await page.waitForTimeout(200);
   expect(await changeOver(page)).toBeLessThan(20);
-  await setRange(page, 'Italic', 1);
+  await setRange(page, 'Letter tilt', 1);
   await page.waitForTimeout(200);
   expect(await changeOver(page)).toBeGreaterThan(500);
 });
@@ -401,6 +406,7 @@ test('exports an editable layered SVG of the sticker', async ({ page }) => {
 
 test('exports a single marquee line as tileable PNG and SVG', async ({ page }) => {
   await page.getByRole('radio', { name: 'Marquee' }).click();
+  await page.getByRole('tab', { name: 'Export', exact: true }).click();
   await page.getByRole('radio', { name: 'Single line' }).click();
   await page.getByRole('radio', { name: 'Colourway 2' }).click();
   await setRange(page, 'Repeats', 3);
@@ -417,6 +423,8 @@ test('exports a single marquee line as tileable PNG and SVG', async ({ page }) =
 });
 
 test('exports a PNG sequence as a zip of frames', async ({ page }) => {
+  await page.getByRole('tab', { name: 'Export', exact: true }).click();
+  await page.getByText('Save an animation', { exact: true }).click();
   await page.getByRole('radio', { name: '2s' }).click();
   await page.getByRole('radio', { name: '30', exact: true }).click();
   const [name, zip] = await downloadFrom(page, () => page.getByRole('button', { name: 'PNG sequence' }).click());
@@ -427,6 +435,8 @@ test('exports a PNG sequence as a zip of frames', async ({ page }) => {
 });
 
 test('records a video of the animation', async ({ page }) => {
+  await page.getByRole('tab', { name: 'Export', exact: true }).click();
+  await page.getByText('Save an animation', { exact: true }).click();
   await page.getByRole('radio', { name: '2s' }).click();
   const [name, video] = await downloadFrom(page, () => page.getByRole('button', { name: 'Video', exact: true }).click());
   expect(name).toMatch(/^sticker-unidentified-dancing-objects\.(mp4|webm)$/);
@@ -434,11 +444,8 @@ test('records a video of the animation', async ({ page }) => {
   await expect(page.getByText(/Video downloaded/)).toBeVisible();
 });
 
-// Minimum stage share of each design's signature colour. The badge ring grows with the
-// text, so a long default line leaves a thinner band on screen.
+// Minimum stage share of the wallpaper signature colour.
 for (const [design, label, colour, share] of [
-  ['Badge', 'Badge design', 'red', 0.02],
-  ['Ribbon', 'Ribbon design', 'lime', 0.03],
   ['Wallpaper', 'Wallpaper design', 'red', 0.03],
 ]) {
   test(`renders the ${design} variation`, async ({ page }) => {
@@ -485,7 +492,7 @@ function twoLevelShare(page, png) {
 
 test('film grain speckles the stage, re-rolls over time and holds when paused', async ({ page }) => {
   await freezeWarp(page);
-  await setRange(page, 'Italic', 0);
+  await setRange(page, 'Letter tilt', 0);
   await setRange(page, 'Stretch', 0);
   await page.waitForTimeout(200);
   expect(await changeOver(page)).toBeLessThan(20);
@@ -564,7 +571,9 @@ function whiteShapes(page, png) {
 test('goo melts the letters of each word together but keeps words apart', async ({ page }) => {
   await freezeWarp(page);
   await setRange(page, 'Stretch', 0);
-  await setRange(page, 'Italic', 0);
+  await setRange(page, 'Letter tilt', 0);
+  await page.getByRole('tab', { name: 'Style', exact: true }).click();
+  await page.getByText('Outline settings', { exact: true }).click();
   await page.getByRole('switch', { name: 'Sticker body & outline' }).click();
   await pause(page);
   const shapesAt = async (goo) => {
@@ -577,4 +586,37 @@ test('goo melts the letters of each word together but keeps words apart', async 
   expect(clean).toBeGreaterThanOrEqual(24); // 27 letters, a couple touching at most
   expect(gooey).toBeLessThan(clean / 2);
   expect(gooey).toBeGreaterThanOrEqual(3); // three words never merge into one
+});
+
+
+test('beginner panel keeps essentials visible and supports keyboard navigation', async ({ page }) => {
+  await expect(page.getByRole('radiogroup', { name: 'Design', exact: true }).getByRole('radio')).toHaveText(['Sticker', 'Marquee', 'Wallpaper']);
+  await expect(page.getByRole('button', { name: 'Advanced type', exact: true })).toHaveAttribute('aria-expanded', 'false');
+  await page.getByLabel('Sticker text', { exact: true }).fill('KEEP IT GOOEY');
+  await page.getByRole('tab', { name: 'Text', exact: true }).press('ArrowRight');
+  await expect(page.getByRole('tab', { name: 'Style', exact: true })).toBeFocused();
+  await expect(page.getByRole('slider', { name: 'Goo', exact: true })).toBeVisible();
+  await expect(page.getByRole('slider', { name: 'Grain', exact: true })).toHaveCount(0);
+  await page.getByRole('tab', { name: 'Style', exact: true }).press('ArrowRight');
+  await expect(page.getByRole('tab', { name: 'Motion', exact: true })).toBeFocused();
+  await expect(page.getByRole('slider', { name: 'Wave detail', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Wild', exact: true }).click();
+  await expect(page.getByRole('slider', { name: 'Speed', exact: true })).toHaveValue('1.4');
+  await expect(page.getByRole('slider', { name: 'Wobble', exact: true })).toHaveValue('0.85');
+  await page.getByRole('slider', { name: 'Speed', exact: true }).press('ArrowRight');
+  await expect(page.getByRole('button', { name: 'Wild', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await page.getByRole('tab', { name: 'Motion', exact: true }).press('End');
+  await expect(page.getByRole('tab', { name: 'Export', exact: true })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'PNG', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Video', exact: true })).toHaveCount(0);
+  await page.getByRole('tab', { name: 'Export', exact: true }).press('Home');
+  await expect(page.getByLabel('Sticker text', { exact: true })).toHaveValue('KEEP IT GOOEY');
+});
+
+test('text shortcut returns to the message after changing marquee style', async ({ page }) => {
+  await page.getByRole('radio', { name: 'Marquee', exact: true }).click();
+  await page.getByRole('tab', { name: 'Style', exact: true }).click();
+  await page.getByRole('button', { name: 'Type on sticker', exact: true }).click();
+  await expect(page.getByRole('tab', { name: 'Text', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByLabel('Sticker text', { exact: true })).toBeFocused();
 });
