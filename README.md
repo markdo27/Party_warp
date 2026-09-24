@@ -9,6 +9,10 @@ silhouette with a pink outline, warped live on the GPU. The default reads
 ## Features
 
 - **Live text.** Click the sticker and type. It re-flows and resizes as you go (up to six lines).
+- **Melting messages.** In Sticker → Content, enable **Melt between messages** to loop two
+  or three messages. Adjust the hold and melting times; the letters and outline morph together.
+  Blank messages are skipped. Pause freezes the transition, and animation exports can include
+  the full loop. This mode uses text, with per-letter stretch and tilt paused.
 - **SVG logos.** Upload or drop a static SVG (up to 2 MB) to use its shape with the editor’s
   colours and goo effect in Sticker, Marquee, or Wallpaper. Replace it or return to your saved text. Convert
   lettering to outlines; linked images, fonts, filters, and animations are unsupported.

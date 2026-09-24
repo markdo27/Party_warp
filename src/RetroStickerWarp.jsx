@@ -207,6 +207,10 @@ export const DEFAULTS = Object.freeze({
   design: 'sticker',
   fontId: 'archivo',
   tagFontId: 'archivo-tag',
+  messageLoop: false,
+  messageHold: 2.5,
+  messageMelt: 1.5,
+  exportMessageLoop: true,
   caps: true,
   align: 'zigzag',
   fontSize: 150,
@@ -249,6 +253,8 @@ export const DEFAULTS = Object.freeze({
 });
 
 export const RANGES = Object.freeze({
+  messageHold: { min: 0.5, max: 8, step: 0.25 },
+  messageMelt: { min: 0.5, max: 4, step: 0.25 },
   fontSize: { min: 48, max: 280, step: 1 },
   lineSpacing: { min: 0.6, max: 1.8, step: 0.01 },
   tracking: { min: -0.15, max: 0.35, step: 0.005 },
@@ -281,7 +287,7 @@ export const RANGES = Object.freeze({
 
 const HEX_RE = /^#[0-9a-f]{6}$/i;
 const COLOR_KEYS = ['fill', 'sil', 'line', 'bg'];
-const BOOL_KEYS = ['caps', 'boil', 'sticker', 'transparent'];
+const BOOL_KEYS = ['caps', 'boil', 'sticker', 'transparent', 'messageLoop', 'exportMessageLoop'];
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\x00-\x08\x0B-\x1F\x7F-\x9F]/g;
 
@@ -789,7 +795,13 @@ export function designLayout({ design, scene, tagBox, params, stage, free }) {
 
   if (design === 'sticker') {
     const bounds = stickerBounds(scene.inkBox, params);
-    return result({ view: computeView(free, bounds, params.fontSize), warpDomain: null, colours: [sticker, sticker, sticker], stage: params.bg, rows: scene.layout.rows.length, bounds });
+    if (scene.isSequence) {
+      bounds.x -= 0.45;
+      bounds.y -= 0.45;
+      bounds.width += 0.9;
+      bounds.height += 0.9;
+    }
+    return result({ view: computeView(free, bounds, params.fontSize), warpDomain: scene.isSequence ? { origin: scene.fieldOrigin, size: scene.fieldSize } : null, colours: [sticker, sticker, sticker], stage: params.bg, rows: scene.layout.rows.length, bounds });
   }
 
   // Whole-stage designs: the world origin sits at the stage's top-left corner.
@@ -1527,6 +1539,37 @@ function rasterizeTagline(canvas, lines, maxSide, font = DEFAULT_TAG_FONT) {
 let fontCssPromise = null;
 let uploadCounter = 0;
 
+/** A readable hold followed by a smooth loop to the next message. */
+function messageFrame(seconds, count, hold, melt) {
+  const duration = hold + melt;
+  const slot = Math.max(0, seconds) / duration;
+  const index = Math.floor(slot) % count;
+  const progress = clamp(((slot % 1) * duration - hold) / melt, 0, 1);
+  return { index, next: (index + 1) % count, mix: progress * progress * (3 - 2 * progress) };
+}
+
+/** Full ink distances avoid gaps when morphing between unrelated letter shapes. */
+function messageField(base, goo) {
+  const data = buildFieldData(base, goo);
+  const { gooK, gooRowK } = effectUniforms({ ...DEFAULTS, goo });
+  const union = (a, b, k) => Math.min(a, b) - Math.pow(Math.max(k - Math.abs(a - b), 0), 2) / Math.max(4 * k, 1e-5);
+  const alpha = new Uint8Array(base.width * base.height);
+  for (let i = 0; i < alpha.length; i++) {
+    const j = i * 4;
+    const d = union(union(data.glyphs[j], data.glyphs[j + 1], gooK), union(data.glyphs[j + 2], data.glyphs[j + 3], gooK), gooRowK);
+    alpha[i] = Math.round(clamp(0.5 - d * base.pxPerEm, 0, 1) * 255);
+  }
+  const distances = signedDistanceField(alpha, base.width, base.height);
+  for (let i = 0; i < distances.length; i++) data.glyphs[i * 4] = distances[i] / base.pxPerEm;
+  const b = base.inkBox;
+  return {
+    width: base.width, height: base.height, data,
+    body: { width: base.sil.width, height: base.sil.height },
+    originEm: [base.originEm[0] - b.x - b.width / 2, base.originEm[1] - b.y - b.height / 2],
+    sizeEm: base.sizeEm,
+  };
+}
+
 function ensureFontStylesheet() {
   if (fontCssPromise) return fontCssPromise;
   fontCssPromise = new Promise((resolve) => {
@@ -1642,6 +1685,13 @@ void main() {
 const MAIN_FRAG_SRC = `#version 300 es
 precision highp float;
 uniform sampler2D uField;      // RGBA: letter-class SDFs, row parity × letter parity (em)
+uniform sampler2D uNextField;
+uniform sampler2D uNextBody;
+uniform vec2 uNextOrigin;
+uniform vec2 uNextSize;
+uniform vec2 uNextBodySize;
+uniform float uMessageMix;
+uniform float uMessageOn;
 uniform sampler2D uBody;       // R: silhouette SDF, half resolution (em)
 uniform sampler2D uWarp;       // RG: displacement, B: swell, A: wobble
 uniform sampler2D uStretch;    // RG32F: display→field x offset, letter index (per row)
@@ -1838,6 +1888,15 @@ Layer tileLayer(vec2 p) {
 
 // Glyph distance (per-letter stretch + lean) and silhouette distance (stretch only) at w.
 vec2 fieldAt(vec2 w, float row, float pivot, float t) {
+  if (uMessageOn > 0.5) {
+    float m = uMessageMix;
+    float liquid = 4.0 * m * (1.0 - m);
+    vec2 flow = vec2(sin(w.y * 4.3 + m * 6.283), cos(w.x * 3.7 - m * 6.283));
+    vec2 q = w + liquid * 0.24 * flow;
+    vec2 a = vec2(texture(uField, (q - uOrigin) / uSize).r, texture(uBody, (q - uOrigin) / uBodySize).r);
+    vec2 b = vec2(texture(uNextField, (q - uNextOrigin) / uNextSize).r, texture(uNextBody, (q - uNextOrigin) / uNextBodySize).r);
+    return mix(a, b, m) - liquid * vec2(0.18, 0.12);
+  }
   float glyph = glyphAt(w, row, pivot, t);
   float body = texture(uBody, (vec2(bodyX(w, row), w.y) - uOrigin) / uBodySize).r;
   return vec2(glyph, body);
@@ -2086,6 +2145,8 @@ function createRenderer(canvas) {
   const maxSize = Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE), gl.getParameter(gl.MAX_RENDERBUFFER_SIZE));
   let floatWarp = Boolean(gl.getExtension('EXT_color_buffer_float'));
   let field = null;
+  let normalField = null;
+  let messageFields = [];
   let tag = null;
   let warpTexels = [0, 0];
   let stretchSize = [0, 0];
@@ -2119,6 +2180,7 @@ function createRenderer(canvas) {
 
   /** Letter-class fields (RGBA, full resolution) and the sticker body (R, half resolution). */
   function setField(next) {
+    normalField = null;
     field = null; // never pair a stale texture with new bounds
     if (!next) return;
     const { width, height, data, body } = next;
@@ -2127,6 +2189,26 @@ function createRenderer(canvas) {
     // Half-resolution texel i covers full-resolution pixels 2i and 2i + 1.
     const bodySizeEm = [(next.sizeEm[0] * 2 * body.width) / width, (next.sizeEm[1] * 2 * body.height) / height];
     field = { originEm: next.originEm, sizeEm: next.sizeEm, bodySizeEm };
+    normalField = field;
+  }
+
+  function setMessages(fields) {
+    const textures = [];
+    try {
+      for (const f of fields) {
+        const entry = { ...f, fieldTex: createTexture(gl, gl.LINEAR), bodyTex: createTexture(gl, gl.LINEAR),
+          bodySizeEm: [f.sizeEm[0] * 2 * f.body.width / f.width, f.sizeEm[1] * 2 * f.body.height / f.height] };
+        textures.push(entry);
+        uploadFloat(entry.fieldTex, gl.RGBA16F, gl.RGBA, { width: f.width, height: f.height, data: f.data.glyphs }, 'Message ink');
+        uploadFloat(entry.bodyTex, gl.R16F, gl.RED, { ...f.body, data: f.data.body }, 'Message body');
+        delete entry.data;
+      }
+    } catch (error) {
+      textures.forEach((f) => { gl.deleteTexture(f.fieldTex); gl.deleteTexture(f.bodyTex); });
+      throw error;
+    }
+    messageFields.forEach((f) => { gl.deleteTexture(f.fieldTex); gl.deleteTexture(f.bodyTex); });
+    messageFields = textures;
   }
 
   function setTag(next) {
@@ -2182,11 +2264,23 @@ function createRenderer(canvas) {
     gl.useProgram(mainProg.program);
     const u = mainProg.u;
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, fieldTex);
+    gl.bindTexture(gl.TEXTURE_2D, field.fieldTex ?? fieldTex);
     gl.uniform1i(u('uField'), 0);
     gl.activeTexture(gl.TEXTURE5);
-    gl.bindTexture(gl.TEXTURE_2D, bodyTex);
+    gl.bindTexture(gl.TEXTURE_2D, field.bodyTex ?? bodyTex);
     gl.uniform1i(u('uBody'), 5);
+    const next = frame.message ? messageFields[frame.message.next] ?? field : field;
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, next.fieldTex ?? fieldTex);
+    gl.uniform1i(u('uNextField'), 6);
+    gl.activeTexture(gl.TEXTURE7);
+    gl.bindTexture(gl.TEXTURE_2D, next.bodyTex ?? bodyTex);
+    gl.uniform1i(u('uNextBody'), 7);
+    gl.uniform2fv(u('uNextOrigin'), next.originEm);
+    gl.uniform2fv(u('uNextSize'), next.sizeEm);
+    gl.uniform2fv(u('uNextBodySize'), next.bodySizeEm);
+    gl.uniform1f(u('uMessageOn'), frame.message && messageFields.length > 1 ? 1 : 0);
+    gl.uniform1f(u('uMessageMix'), frame.message?.mix ?? 0);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, warpTex);
     gl.uniform1i(u('uWarp'), 1);
@@ -2238,6 +2332,7 @@ function createRenderer(canvas) {
   }
 
   function draw(frame, target) {
+    field = frame.message ? messageFields[frame.message.index] ?? normalField : normalField;
     gl.disable(gl.BLEND);
     gl.bindVertexArray(vao);
     if (!field || !frame.view) {
@@ -2255,6 +2350,7 @@ function createRenderer(canvas) {
   return {
     maxSize,
     setField,
+    setMessages,
     setTag,
     setStretch,
     render(frame) {
@@ -2297,6 +2393,7 @@ function createRenderer(canvas) {
       }
     },
     dispose() {
+      setMessages([]);
       gl.deleteProgram(warpProg.program);
       gl.deleteProgram(mainProg.program);
       gl.deleteTexture(fieldTex);
@@ -2395,7 +2492,7 @@ function exportFraming(live, clock, { scope, line, repeats, maxSide, wholeScale 
       patch: { mode: MODE_INDEX.bands, view: { centerPx: [0, 0], pxPerEm, centerEm: origin }, warpDomain: { origin, size: [wEm, g.bandH] } },
     };
   }
-  if (p.design === 'sticker') return fitBox(expandBox(stickerBounds(scene.inkBox, p), 0.08));
+  if (p.design === 'sticker') return fitBox(expandBox(scene.isSequence ? L.bounds : stickerBounds(scene.inkBox, p), 0.08));
   if (p.design === 'oval') return fitBox(expandBox(L.bounds, 0.08));
   const scale = Math.min(wholeScale, maxSide / Math.max(stage.width, stage.height));
   return {
@@ -2523,7 +2620,7 @@ const currentDpr = () => clamp(window.devicePixelRatio || 1, 1, 2);
  * `cache` keeps both buffers between frames.
  */
 function computeStretchFrame(scene, params, time, rowCount, cache) {
-  if (!scene || scene.empty || scene.isLogo || !(params.stretch > 0 || params.italic > 0)) return null;
+  if (!scene || scene.empty || scene.isLogo || scene.isSequence || !(params.stretch > 0 || params.italic > 0)) return null;
   const rows = DESIGN_INFO[params.design]?.line
     ? Array.from({ length: rowCount }, (_, b) => ({ row: scene.layout.rows[0], seed: b + 1 }))
     : scene.layout.rows.map((row, i) => ({ row, seed: i + 1 }));
@@ -2570,6 +2667,7 @@ function frameFromLive(live, clock, stretch) {
     width: Math.max(1, Math.round(stage.width * dpr)),
     height: Math.max(1, Math.round(stage.height * dpr)),
     time: foldTime(clock.shown),
+    message: p.design === 'sticker' && p.messageLoop && live.scene?.isSequence ? messageFrame(clock.messages ?? 0, live.scene.messageCount, p.messageHold, p.messageMelt) : null,
     seed: clock.seed,
     boil: p.boil ? 1 : 0,
     ...effectUniforms(p),
@@ -2917,6 +3015,7 @@ export default function RetroStickerWarp({
   className = '',
 }) {
   const [text, setText] = useState(() => sanitizeInput(initialText));
+  const [extraMessages, setExtraMessages] = useState(['LET’S DANCE']);
   const [uploadedLogo, setLogo] = useState(null);
   const [logoLoading, setLogoLoading] = useState(false);
   const [logoError, setLogoError] = useState('');
@@ -2974,7 +3073,10 @@ export default function RetroStickerWarp({
   const logo = design === 'oval' ? null : uploadedLogo;
   const oneLine = DESIGN_INFO[design].line; // the lockup set on one line, with a tagline
   const isSticker = design === 'sticker' || design === 'oval'; // layouts with direct text editing
-  const canTypeOnStage = isSticker && !logo;
+  const sequenceEnabled = design === 'sticker' && !logo && params.messageLoop;
+  const messageTexts = useMemo(() => [text, ...extraMessages].filter((v) => v.trim()), [text, extraMessages]);
+  const sequenceActive = sequenceEnabled && messageTexts.length > 1;
+  const canTypeOnStage = isSticker && !logo && !sequenceEnabled;
   const bandLike = design === 'bands'; // band themes + single-line export
   const panelOpen = panelPref ?? stage.width >= PANEL_AUTO_OPEN_WIDTH;
   const lines = useMemo(() => displayLines(text, params.caps), [text, params.caps]);
@@ -3000,6 +3102,10 @@ export default function RetroStickerWarp({
 
   const notify = useCallback((tone, message) => setToast({ tone, message, id: Math.random() }), []);
   const update = useCallback((key, value) => setParams((prev) => sanitizeParams({ ...prev, [key]: value })), []);
+  useEffect(() => {
+    clockRef.current.messages = 0;
+    dirtyRef.current = true;
+  }, [params.messageHold, params.messageMelt]);
   const applyPalette = useCallback(
     (pal) => setParams((prev) => sanitizeParams({ ...prev, fill: pal.fill, sil: pal.sil, line: pal.line, bg: pal.bg })),
     [],
@@ -3142,14 +3248,36 @@ export default function RetroStickerWarp({
     if (!renderer || (!logo && !fontState.family)) return undefined;
     const handle = requestAnimationFrame(() => {
       try {
+        if (sequenceActive) {
+          rasterRef.current ??= document.createElement('canvas');
+          const bases = messageTexts.map((message) => rasterizeSticker(rasterRef.current, {
+            lines: displayLines(message, params.caps), family: fontState.family,
+            lineSpacing: params.lineSpacing, tracking: params.tracking, align: params.align, maxSide: renderer.maxSize,
+          })).filter((base) => !base.empty);
+          if (bases.length > 1) {
+            renderer.setMessages(bases.map((base) => messageField(base, params.goo)));
+            const width = Math.max(...bases.map((base) => base.inkBox.width));
+            const height = Math.max(...bases.map((base) => base.inkBox.height));
+            setScene({ empty: false, layout: bases[0].layout, isSequence: true, messageCount: bases.length,
+              inkBox: { x: -width / 2, y: -height / 2, width, height },
+              fieldOrigin: [-width / 2 - FIELD_PAD_EM, -height / 2 - FIELD_PAD_EM],
+              fieldSize: [width + 2 * FIELD_PAD_EM, height + 2 * FIELD_PAD_EM] });
+            clockRef.current.messages = 0;
+            if (fontState.loaded) requestMissingGlyphs(fontState.family, messageTexts.join(''));
+            dirtyRef.current = true;
+            return;
+          }
+        }
+        renderer.setMessages([]);
+        const renderLines = sequenceEnabled ? displayLines(messageTexts[0] ?? '', params.caps) : fieldLines;
         const settings = [params.lineSpacing, params.tracking, params.align];
-        const key = logo ? `logo:${logo.id}:${renderer.maxSize}` : JSON.stringify([fieldLines, fontState, settings, renderer.maxSize, glyphEpoch]);
+        const key = logo ? `logo:${logo.id}:${renderer.maxSize}` : JSON.stringify([renderLines, fontState, settings, renderer.maxSize, glyphEpoch]);
         if (baseRef.current?.key !== key) {
           rasterRef.current ??= document.createElement('canvas');
           baseRef.current = {
             key,
             ...(logo ? (logo.maxSide === renderer.maxSize ? logo.base : rasterizeLogo(logo, renderer.maxSize)) : rasterizeSticker(rasterRef.current, {
-              lines: fieldLines,
+              lines: renderLines,
               family: fontState.family,
               lineSpacing: params.lineSpacing,
               tracking: params.tracking,
@@ -3157,7 +3285,7 @@ export default function RetroStickerWarp({
               maxSide: renderer.maxSize,
             })),
           };
-          if (!logo && fontState.loaded) requestMissingGlyphs(fontState.family, fieldLines.join(''));
+          if (!logo && fontState.loaded) requestMissingGlyphs(fontState.family, renderLines.join(''));
         }
         const base = baseRef.current;
         renderer.setField(
@@ -3191,6 +3319,10 @@ export default function RetroStickerWarp({
     design,
     logo,
     fieldLines,
+    sequenceActive,
+    sequenceEnabled,
+    messageTexts,
+    params.caps,
     fontState,
     params.lineSpacing,
     params.tracking,
@@ -3295,7 +3427,7 @@ export default function RetroStickerWarp({
             seed = boilStep % 3; // cycle three "redraws", like hand-drawn line boil
           }
         }
-        clockRef.current = { time, shown, scroll, shownScroll, seed };
+        clockRef.current = { time, shown, scroll, shownScroll, seed, messages: (clock.messages ?? 0) + (live.scene?.isSequence ? dt : 0) };
       }
       if (!due) return;
       dirtyRef.current = false;
@@ -3366,6 +3498,13 @@ export default function RetroStickerWarp({
 
   const focusTyping = useCallback(
     (index) => {
+      if (sequenceEnabled) {
+        setPanelTab('Content');
+        setPanelPref(true);
+        focusAfterPanelRef.current = 'text';
+        requestAnimationFrame(() => panelTextRef.current?.focus());
+        return;
+      }
       if (logo) {
         if (panelOpen && panelTab === 'Content') {
           logoInputRef.current?.focus();
@@ -3396,7 +3535,7 @@ export default function RetroStickerWarp({
       ta.setSelectionRange(pos, pos);
       syncSelection();
     },
-    [logo, isSticker, panelOpen, panelTab, syncSelection],
+    [logo, isSticker, sequenceEnabled, panelOpen, panelTab, syncSelection],
   );
 
   const placeCaret = useCallback(
@@ -3700,14 +3839,16 @@ export default function RetroStickerWarp({
         return;
       }
       const { renderer, live, framing, frameAt } = setup;
-      const { motionFps: fps, motionSeconds: seconds } = live.params;
+      const { motionFps: fps } = live.params;
+      const fullLoop = live.scene?.isSequence && live.params.exportMessageLoop;
+      const seconds = fullLoop ? live.scene.messageCount * (live.params.messageHold + live.params.messageMelt) : live.params.motionSeconds;
       const frames = Math.round(fps * seconds);
-      const start = clockRef.current;
+      const start = { ...clockRef.current, ...(fullLoop && { messages: 0 }) };
       const cache = {};
       const alpha = kind === 'frames' && live.params.transparent ? 0 : 1; // video stays opaque
       const renderPixels = (i) => {
         const mc = motionClock(i, fps, live.params);
-        const clock = { ...start, shown: start.shown + mc.time, shownScroll: start.shownScroll + mc.scroll, seed: mc.seed };
+        const clock = { ...start, shown: start.shown + mc.time, shownScroll: start.shownScroll + mc.scroll, seed: mc.seed, messages: (start.messages ?? 0) + i / fps };
         const stretch = computeStretchFrame(live.scene, live.params, clock.shown, live.layout.rows, cache);
         if (stretch) renderer.setStretch(stretch);
         return renderer.readPixels(frameAt(clock, stretch, alpha));
@@ -3762,12 +3903,14 @@ export default function RetroStickerWarp({
   const showToolbar = !(panelOpen && panelRect && panelRect.x <= stage.width * 0.35);
   const bandTheme = BAND_THEMES.find((t) => t.id === params.bandTheme) ?? BAND_THEMES[0];
   const stageColor = design === 'bands' ? bandTheme.bands[0].bg : params.bg;
-  const reading = logo ? `${logo.name}${oneLine ? ` — ${tagline.replace(/\n/g, ' ')}` : ''}` : oneLine
+  const reading = sequenceEnabled ? messageTexts.map((message) => displayLines(message, params.caps).join(' ')).join(' → ') || 'empty' : logo ? `${logo.name}${oneLine ? ` — ${tagline.replace(/\n/g, ' ')}` : ''}` : oneLine
     ? `${bandLine(lines) || 'empty'} — ${tagline.replace(/\n/g, ' ')}`
     : lines.join(' ').trim() || 'empty';
   const canvasLabel = { sticker: 'Animated sticker', bands: 'Scrolling marquee' }[design] ?? `${designName} design`;
   const hint = logo ? 'SVG logo · replace or remove it in Content' : !isSticker
     ? `${designName} — edit the text in the panel`
+    : sequenceEnabled
+      ? 'Edit messages in Content · Play / Pause controls the loop'
     : typing
       ? 'Typing — Enter adds a line · Esc to finish'
       : 'Click the sticker and type';
@@ -4036,7 +4179,9 @@ export default function RetroStickerWarp({
 
             <Section icon={TextCursorInput} title={logo ? "Logo settings" : "Write your message"}>
               {!logo && (<>
+              {sequenceEnabled && <label htmlFor="rsw-main-message" className="block text-[12px] text-white/70">Message 1</label>}
               <textarea
+                id="rsw-main-message"
                 ref={panelTextRef}
                 value={text}
                 onChange={onTextChange}
@@ -4054,6 +4199,30 @@ export default function RetroStickerWarp({
                 <span className="rsw-mono">{text.length}/{MAX_CHARS} · {text.split('\n').length}/{MAX_LINES} lines</span>
               </p>
               </>)}
+              {design === 'sticker' && !logo && (
+                <div className="space-y-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                  <Toggle label="Melt between messages" checked={params.messageLoop} onChange={(v) => { update('messageLoop', v); setTyping(false); }} />
+                  <p className="text-[11px] leading-relaxed text-white/55">Loop two or three messages with a liquid transition.</p>
+                  {sequenceEnabled && <>
+                    {extraMessages.map((message, i) => (
+                      <div key={i} className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <label htmlFor={`rsw-message-${i + 2}`} className="text-[12px] text-white/70">Message {i + 2}</label>
+                          {extraMessages.length > 1 && <button type="button" aria-label={`Remove message ${i + 2}`} className={`rounded px-2 py-1 text-[11px] text-white/60 hover:bg-white/10 ${focusRing}`} onClick={() => setExtraMessages((prev) => prev.filter((_, j) => j !== i))}>Remove</button>}
+                        </div>
+                        <textarea id={`rsw-message-${i + 2}`} value={message} rows={2} maxLength={MAX_CHARS} spellCheck={false}
+                          placeholder="Type the next message…" onChange={(e) => { const value = sanitizeInput(e.target.value); setExtraMessages((prev) => prev.map((v, j) => j === i ? value : v)); }}
+                          className="block w-full resize-none rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-[13px] text-white focus:border-[#ffc8f8]/60 focus:outline-none" />
+                      </div>
+                    ))}
+                    {extraMessages.length < 2 && <button type="button" className={`w-full rounded-lg border border-dashed border-white/20 py-2 text-[12px] text-white/75 hover:bg-white/5 ${focusRing}`} onClick={() => setExtraMessages((prev) => [...prev, ''])}>+ Add message 3</button>}
+                    <Slider label="Hold each message" value={params.messageHold} range={RANGES.messageHold} format={(v) => `${v}s`} onChange={(v) => update('messageHold', v)} />
+                    <Slider label="Melting time" value={params.messageMelt} range={RANGES.messageMelt} format={(v) => `${v}s`} onChange={(v) => update('messageMelt', v)} />
+                    <p className="text-[11px] leading-relaxed text-white/55">{sequenceActive ? `Full loop: ${(messageTexts.length * (params.messageHold + params.messageMelt)).toFixed(1)}s. Use Play / Pause below to control the preview.` : 'Add at least two non-empty messages to start. Blank messages are skipped.'}</p>
+                    <button type="button" className={`rounded-lg border border-white/15 px-3 py-2 text-[12px] ${focusRing}`} onClick={() => { clockRef.current.messages = 0; dirtyRef.current = true; setPlaying(true); }}>Play from start</button>
+                  </>}
+                </div>
+              )}
               {oneLine && (
                 <div>
                   <label htmlFor="rsw-tagline" className="mb-1.5 block text-[12px] text-white/70">
@@ -4283,11 +4452,12 @@ export default function RetroStickerWarp({
               <Slider label="Speed" value={params.speed} range={RANGES.speed} format={fmt.times} onChange={(v) => update('speed', v)} />
               <Slider label="Wobble" value={params.intensity} range={RANGES.intensity} format={fmt.pct} onChange={(v) => update('intensity', v)} />
               <Advanced title="Advanced motion">
+              {sequenceActive && <p className="text-[11px] leading-relaxed text-white/55">Message transitions move the whole shape. Letter stretch and tilt are paused during the sequence.</p>}
               {logo && <p className="text-[11px] leading-relaxed text-white/55">Logos move as one shape. Letter stretch and tilt apply to text only.</p>}
               <Slider label="Wave detail" value={params.frequency} range={RANGES.frequency} format={fmt.times} onChange={(v) => update('frequency', v)} />
               <Slider label="Breathing" value={params.swell} range={RANGES.swell} format={fmt.pct} onChange={(v) => update('swell', v)} />
-              <Slider label="Stretch" disabled={Boolean(logo)} value={params.stretch} range={RANGES.stretch} format={fmt.pct} onChange={(v) => update('stretch', v)} />
-              <Slider label="Letter tilt" disabled={Boolean(logo)} value={params.italic} range={RANGES.italic} format={fmt.pct} onChange={(v) => update('italic', v)} />
+              <Slider label="Stretch" disabled={Boolean(logo) || sequenceActive} value={params.stretch} range={RANGES.stretch} format={fmt.pct} onChange={(v) => update('stretch', v)} />
+              <Slider label="Letter tilt" disabled={Boolean(logo) || sequenceActive} value={params.italic} range={RANGES.italic} format={fmt.pct} onChange={(v) => update('italic', v)} />
               {!isSticker && (
                 <Slider
                   label="Scroll"
@@ -4390,13 +4560,17 @@ export default function RetroStickerWarp({
               </div>
 
               <Advanced title="Save an animation">
+              {sequenceActive && <>
+                <Toggle label="Export full message loop" checked={params.exportMessageLoop} onChange={(v) => update('exportMessageLoop', v)} />
+                <p className="text-[11px] text-white/55">Includes all messages and the melt back to the first. PNG and SVG save the current frame.</p>
+              </>}
               <div className="grid grid-cols-2 gap-2">
-                <Segmented
+                {sequenceActive && params.exportMessageLoop ? <p className="self-center text-[12px] text-white/70">Full loop · {(messageTexts.length * (params.messageHold + params.messageMelt)).toFixed(1)}s</p> : <Segmented
                   label="Length"
                   value={params.motionSeconds}
                   onChange={(v) => update('motionSeconds', v)}
                   options={MOTION_SECONDS.map((s) => ({ value: s, label: `${s}s` }))}
-                />
+                />}
                 <Segmented
                   label="Frame rate"
                   value={params.motionFps}
