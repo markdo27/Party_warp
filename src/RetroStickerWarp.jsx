@@ -1623,33 +1623,13 @@ function longestSharedRun(from, to) {
   return best;
 }
 
-const visibleChars = (base) => base.layout.rows.reduce((n, r) => n + r.chars.filter((c) => c.trim() !== '').length, 0);
-
 /**
- * Melt windows as fractions of the melting time: [drain start, drain end, pour start, pour
- * end]. Ink only the old message has drains top to bottom first; ink only the new one pours
- * in behind it, so different letters never overlap. With only one of the two to do, it gets
- * most of the melt.
- */
-export function messageTiming(leaving, arriving) {
-  // The pour front always trails the drain front, so different letters never meet.
-  if (leaving && arriving) return [0.02, 0.55, 0.3, 0.98];
-  if (leaving) return [0.05, 0.72, 0.3, 0.95];
-  return [0.0, 0.3, 0.2, 0.97];
-}
-
-/**
- * How one message melts into the next: the offset that keeps shared text still, the box that
- * text occupies (old message, centred coordinates; null when nothing is shared) and timing.
+ * How one message melts into the next: the offset that keeps shared text still, and the box
+ * that text occupies (old message, centred coordinates; null when nothing is shared).
  */
 export function messagePlan(from, to) {
   const run = longestSharedRun(from, to);
-  const shared = run?.visible ?? 0;
-  return {
-    shift: run?.shift ?? [0, 0],
-    sharedBox: run?.box ?? null,
-    timing: messageTiming(visibleChars(from) > shared, visibleChars(to) > shared),
-  };
+  return { shift: run?.shift ?? [0, 0], sharedBox: run?.box ?? null };
 }
 
 /** Full ink distances avoid gaps when morphing between unrelated letter shapes. */
@@ -1795,7 +1775,6 @@ uniform float uMessageHeight;
 uniform vec2 uMessageAlign;     // next message's offset so shared text lines up (em)
 uniform float uMessageSpan;     // farthest the backing may need to grow or retract (em)
 uniform vec4 uMessageBoxes;     // ink half-sizes: current message (xy), next message (zw)
-uniform vec4 uMessageTiming;    // drain start, drain end, pour start, pour end (fractions)
 uniform vec4 uMessageShared;    // box of the text both messages share, old coordinates (em)
 uniform sampler2D uBody;       // R: silhouette SDF, half resolution (em)
 uniform sampler2D uWarp;       // RG: displacement, B: swell, A: wobble
@@ -2014,12 +1993,13 @@ float bodyDist(sampler2D tex, vec2 p, vec2 origin, vec2 size) {
   return texture(tex, (p - origin) / size).r + length(outside);
 }
 
-// Message melt, top to bottom. Text both messages share (lined up by uMessageAlign) never
-// moves. Ink only the old message has droops and drains away under a first liquid front;
-// ink only the new one pours in behind a second front that follows it down, a few drip
-// lanes running ahead, so different letters never overlap. The backing grows out into the
-// new shape before the pour and retracts after the drain, and the pair glides so the new
-// message ends centred. Every front starts above and ends below all visible ink.
+// Message melt: one liquid wave runs down the sticker. Below it the old message, above it the
+// new one; in the short wet band between, old letters droop and drip away while new letters
+// pour in right behind them, a few drips running ahead. The wave line is uneven, like a
+// real run of paint. Text both messages share (lined up by uMessageAlign) never moves, and
+// the pair glides so the new message ends centred. The backing hugs whatever ink is there:
+// it stays around old letters until they drain and appears around new ones as they arrive,
+// one gooey shape throughout, so a long message never leaves a bare slab.
 vec2 messageAt(vec2 w, float t) {
   float m = uMessageMix;
   // Holding: the message is drawn like any sticker, letters stretching and leaning.
@@ -2029,13 +2009,16 @@ vec2 messageAt(vec2 w, float t) {
   float oldInk = messageInk(uField, (po - uOrigin) / uSize);
   float newInk = messageInk(uNextField, (pn - uNextOrigin) / uNextSize);
 
+  float wave = smoothstep(0.03, 0.97, m);
+  float wet = sin(3.14159265 * wave);
   float lane = 0.5 + 0.5 * sin(w.x * 8.3 + 1.6 * sin(w.x * 2.7));
   float drip = lane * lane * lane * lane;
-  float reach = 0.5 * uMessageHeight + abs(uMessageAlign.y) + 0.2;
-  float draining = smoothstep(uMessageTiming.x, uMessageTiming.y, m);
-  float pouring = smoothstep(uMessageTiming.z, uMessageTiming.w, m);
-  float drainFront = mix(-reach, reach, draining) + 0.18 * drip * sin(3.14159265 * draining);
-  float pourFront = mix(-reach, reach, pouring) + 0.14 * drip * sin(3.14159265 * pouring);
+  float sway = 0.2 * sin(w.x * 1.7 + 0.6) + 0.1 * sin(w.x * 3.9 + 2.1);
+  const float GAP = 0.3; // the wet band between the two messages (em)
+  float reach = 0.5 * uMessageHeight + abs(uMessageAlign.y) + 0.9;
+  float drainFront = mix(-reach, reach + GAP, wave) + wet * (sway + 0.18 * drip);
+  float pourFront = drainFront - GAP + wet * 0.14 * drip;
+
   // Until the pour passes, outlines within a hair of each other count as shared (sub-pixel
   // raster differences, a neighbour's goo fattening a stroke), so nothing peels off a letter
   // both messages have. Behind the pour the result is exactly the new message.
@@ -2045,29 +2028,45 @@ vec2 messageAt(vec2 w, float t) {
   vec2 runHalf = 0.5 * (uMessageShared.zw - uMessageShared.xy);
   float shared = max(max(oldInk, newInk - slack), roundBox(po - runCentre, runHalf) - 0.08);
 
-  // Leaving ink droops into the drain front, drips pulling furthest, then drains away.
-  float sag = 0.2 * (0.3 + drip) * sin(3.14159265 * draining) * smoothstep(0.45, 0.0, w.y - drainFront);
+  // Leaving ink droops into the wave, drips pulling furthest, then drains away.
+  float sag = 0.2 * (0.3 + drip) * wet * smoothstep(0.45, 0.0, w.y - drainFront);
   vec2 lift = vec2(0.0, sag);
   // Exactly the old ink the shared part doesn't claim, so together they are the old message.
   float oldOnly = max(messageInk(uField, (po - lift - uOrigin) / uSize),
                       min(slack - messageInk(uNextField, (pn - lift - uNextOrigin) / uNextSize),
                           0.08 - roundBox(po - lift - runCentre, runHalf)));
   // Leaving ink thins a touch as it starts to drain, so any leftover rim can't linger.
-  float leaving = smax(oldOnly + 0.02 * smoothstep(0.0, 0.2, draining), drainFront - w.y, 0.05);
+  float leaving = smax(oldOnly + 0.02 * smoothstep(0.0, 0.2, wave), drainFront - w.y, 0.05);
   float arriving = smax(newInk, w.y - pourFront, 0.035);
   float ink = min(min(shared, arriving), leaving);
 
-  // The backing grows out from the old message into the new shape before the pour, and
-  // retracts onto the new message after the drain. Growth follows a rounded box around each
-  // message's ink, so its edge is always round and never a sliver.
+  // Backing rides the same wave: the new backing above it (a little ahead of the new
+  // letters, so they land on red), the old one below it (a little behind the old letters),
+  // joined into one gooey shape. The wide rounding on the cut swallows any strip before it
+  // gets thin, so the edge never leaves slivers. The reach margin keeps both cuts clear of
+  // every visible edge at the start and end, so nothing jumps.
+  const float EDGE = 0.3;   // how far each backing runs past its letters' front (em)
+  const float ROUND = 0.55; // rounding of the cut (em)
   float oldBody = bodyDist(uBody, po, uOrigin, uBodySize);
   float newBody = bodyDist(uNextBody, pn, uNextOrigin, uNextBodySize);
-  float hidden = max(max(uMessageBoxes.x, uMessageBoxes.y), max(uMessageBoxes.z, uMessageBoxes.w)) + 0.7;
-  float grow = mix(-hidden, uMessageSpan, smoothstep(uMessageTiming.z - 0.2, uMessageTiming.z + 0.15, m));
-  float shrink = mix(uMessageSpan, -hidden, smoothstep(uMessageTiming.y - 0.05, min(uMessageTiming.y + 0.25, 1.0), m));
-  float fromOld = roundBox(po, uMessageBoxes.xy) - grow;
-  float towardNew = roundBox(pn, uMessageBoxes.zw) - shrink;
-  float body = min(max(oldBody, newBody), min(max(newBody, fromOld), max(oldBody, towardNew)));
+  // The backing's edge is smooth: the sway and drips belong to the letters. The old backing
+  // is cut right at the wave, so padding under a drained line goes with it; the new one
+  // reaches past that line, so the two always overlap into one shape.
+  float bodyDrain = mix(-reach, reach + GAP, wave);
+  // The first sliver of new backing and the last of the old are thinned away (no letters
+  // sit there at those moments), so no dots or outline-only wisps show.
+  // Old backing beyond the new sticker also thins as the wave finishes, so a drained last
+  // line leaves no outline-only wisps behind.
+  float oldOnlyBacking = smoothstep(0.1, 0.5, newBody);
+  float oldShown = smax(oldBody, bodyDrain - w.y, ROUND)
+                 + 0.25 * smoothstep(0.88, 1.0, wave) + 0.3 * oldOnlyBacking * smoothstep(0.72, 0.95, wave);
+  // New backing shows above the wave, and also grows out from the old backing across new
+  // ground, so new parts (an added word, a longer line) extend the sticker as one connected
+  // tongue instead of appearing as islands. Inside the old backing it changes nothing.
+  float grow = uMessageSpan * smoothstep(0.05, 0.6, m);
+  float newReach = min(w.y - (bodyDrain - GAP + EDGE + 0.1), oldBody - grow);
+  float newShown = smax(newBody, newReach, ROUND) + 0.25 * (1.0 - smoothstep(0.0, 0.12, wave));
+  float body = smin(oldShown, newShown, 0.3 * wet, 1.0);
   return vec2(ink, body);
 }
 
@@ -2464,7 +2463,6 @@ function createRenderer(canvas) {
     const align = field.alignNext ?? [0, 0];
     gl.uniform2fv(u('uMessageAlign'), align);
     gl.uniform1f(u('uMessageSpan'), Math.max(field.inkWidth ?? 1, next.inkWidth ?? 1) + Math.abs(align[0]) + 1);
-    gl.uniform4fv(u('uMessageTiming'), field.timingNext ?? messageTiming(true, true));
     gl.uniform4fv(u('uMessageShared'), field.sharedNext ?? NOTHING_SHARED);
     gl.uniform4f(u('uMessageBoxes'), (field.inkWidth ?? 1) / 2, (field.inkHeight ?? 1) / 2, (next.inkWidth ?? 1) / 2, (next.inkHeight ?? 1) / 2);
     gl.activeTexture(gl.TEXTURE1);
@@ -3465,7 +3463,6 @@ export default function RetroStickerWarp({
             renderer.setMessages(bases.map((base, i) => ({
               ...messageField(base, params.goo),
               alignNext: aligns[i],
-              timingNext: plans[i].timing,
               sharedNext: plans[i].sharedBox,
             })));
             const width = Math.max(...bases.map((base) => base.inkBox.width));

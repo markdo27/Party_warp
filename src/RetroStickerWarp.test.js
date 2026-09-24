@@ -54,7 +54,6 @@ import {
   messageFrame,
   messageLayout,
   messagePlan,
-  messageTiming,
   motionClock,
   noise1,
   ovalGeometry,
@@ -481,22 +480,6 @@ describe('messageAlignment', () => {
     // D: x 0 on row 2 of the old message (ink centre 2.5, 0.25), x 1 in the new (3.5, -0.35).
     expect(dx).toBeCloseTo(0 - 2.5 - (1 - 3.5), 9);
     expect(dy).toBeCloseTo(1.2 - 0.25 - (0 + 0.35), 9);
-  });
-
-  it('plans the melt: drain what leaves, then pour what arrives', () => {
-    const [drainStart, drainEnd, pourStart, pourEnd] = messageTiming(true, true);
-    expect(drainStart).toBeLessThan(pourStart); // old ink starts leaving first…
-    expect(drainEnd).toBeLessThan(pourEnd); // …and is gone before the new ink settles
-    expect(pourEnd).toBeLessThanOrEqual(1);
-    // Adding only (BLK → BLK46) pours for most of the melt; removing only drains for most of it.
-    expect(messagePlan(base(['BLK']), base(['BLK46'])).timing).toEqual(messageTiming(false, true));
-    expect(messagePlan(base(['BLK46']), base(['BLK'])).timing).toEqual(messageTiming(true, false));
-    const [, , addStart, addEnd] = messageTiming(false, true);
-    const [cutStart, cutEnd] = messageTiming(true, false);
-    expect(addEnd - addStart).toBeGreaterThan(0.7);
-    expect(cutEnd - cutStart).toBeGreaterThan(0.6);
-    expect(messagePlan(base(['BLK']), base(['LOVE'])).timing).toEqual(messageTiming(true, true));
-    expect(messagePlan(base(['BLK']), base(['BLK46'])).shift).toEqual([1, 0]);
   });
 
   it('marks only the matched run as shared, in centred coordinates of the old message', () => {
