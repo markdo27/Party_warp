@@ -34,7 +34,7 @@ silhouette with a pink outline, warped live on the GPU. The default reads
 - **Export.**
   - PNG: copy or download, opaque or transparent.
   - SVG: layered vectors for editing.
-  - Video: MP4 or WebM.
+  - Video: MP4 or WebM, trimmed to the design or on a 1:1, 4:5, 9:16 or 16:9 canvas.
   - A PNG sequence (ZIP).
   - A single tileable marquee line.
 

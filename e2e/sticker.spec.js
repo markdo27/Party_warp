@@ -840,3 +840,16 @@ test('letters keep stretching while a message holds in a message loop', async ({
   await page.waitForTimeout(300);
   expect(await changeOver(page)).toBeGreaterThan(300); // letters extend and condense
 });
+
+test('records onto a chosen canvas ratio', async ({ page }) => {
+  await page.getByRole('tab', { name: 'Export', exact: true }).click();
+  await page.getByText('Save an animation', { exact: true }).click();
+  await page.getByRole('radio', { name: '2s' }).click();
+  const canvas = page.getByRole('radiogroup', { name: 'Canvas' });
+  await expect(canvas.getByRole('radio', { name: 'Fit' })).toBeChecked();
+  await canvas.getByRole('radio', { name: '9:16' }).click();
+  await expect(page.getByText('1080 × 1920 px, the design centred inside.')).toBeVisible();
+  const [, zip] = await downloadFrom(page, () => page.getByRole('button', { name: 'PNG sequence' }).click());
+  const png = zip.subarray(zip.indexOf(Buffer.from([0x89, 0x50, 0x4e, 0x47])));
+  expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([1080, 1920]); // IHDR width, height
+});

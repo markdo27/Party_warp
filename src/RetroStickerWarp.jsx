@@ -202,6 +202,10 @@ const ALIGNS = ['zigzag', 'left', 'center', 'right'];
 const EXPORT_SCOPES = ['whole', 'line'];
 const MOTION_SECONDS = [2, 4, 8];
 const MOTION_FPS = [30, 60];
+/** Recording canvases: 'fit' trims to the design; the rest are common social formats. */
+export const MOTION_RATIOS = ['fit', '1:1', '4:5', '9:16', '16:9'];
+const MOTION_CANVAS_PX = { '1:1': [1080, 1080], '4:5': [1080, 1350], '9:16': [1080, 1920], '16:9': [1920, 1080] };
+const CANVAS_MARGIN = 0.08; // share of each side kept clear around a design fitted into a canvas
 
 export const DEFAULTS = Object.freeze({
   design: 'sticker',
@@ -250,6 +254,7 @@ export const DEFAULTS = Object.freeze({
   exportRepeats: 2,
   motionSeconds: 4,
   motionFps: 30,
+  motionRatio: 'fit',
 });
 
 export const RANGES = Object.freeze({
@@ -321,6 +326,7 @@ export function sanitizeParams(input = {}) {
     exportScope: oneOf('exportScope', EXPORT_SCOPES),
     motionSeconds: oneOf('motionSeconds', MOTION_SECONDS),
     motionFps: oneOf('motionFps', MOTION_FPS),
+    motionRatio: oneOf('motionRatio', MOTION_RATIOS),
   };
 }
 
@@ -1319,6 +1325,22 @@ export const pickVideoType = (isSupported) => VIDEO_TYPES.find((t) => isSupporte
 
 /** Video encoders want even dimensions. */
 export const evenSize = (px) => Math.max(2, Math.ceil(px / 2) * 2);
+
+/** Pixel size of a recording canvas ('fit' → null), scaled down to fit `maxSide`, even. */
+export function motionCanvas(ratio, maxSide) {
+  const px = MOTION_CANVAS_PX[ratio];
+  if (!px) return null;
+  const scale = Math.min(1, maxSide / Math.max(...px));
+  const even = (v) => Math.max(2, Math.floor(v / 2) * 2);
+  return { width: even(px[0] * scale), height: even(px[1] * scale) };
+}
+
+/** View that centres `box` (em) in a width × height canvas with a margin all round. */
+export function fitInCanvas(box, width, height) {
+  const room = 1 - 2 * CANVAS_MARGIN;
+  const pxPerEm = Math.min((width * room) / box.width, (height * room) / box.height);
+  return { pxPerEm, centerEm: [box.x + box.width / 2, box.y + box.height / 2] };
+}
 
 /* ── Rasterising (DOM) ────────────────────────────────────────────────────── */
 
@@ -2650,10 +2672,21 @@ const downloadCanvas = async (canvas, filename) => downloadBlob(await canvasToBl
  * marquee band (colourway `line`) exactly `repeats` periods wide, starting on a sticker,
  * so the image tiles horizontally. `even` rounds sizes for video encoders.
  */
-function exportFraming(live, clock, { scope, line, repeats, maxSide, wholeScale = 2, even = false }) {
+function exportFraming(live, clock, { scope, line, repeats, maxSide, wholeScale = 2, even = false, ratio = 'fit' }) {
   const { layout: L, params: p, stage, scene } = live;
   const size = (px) => (even ? evenSize(px) : Math.max(1, Math.round(px)));
+  // A chosen canvas ratio: objects are centred inside it, tiling designs fill it. A single
+  // marquee line keeps its own strip shape so it still tiles.
+  const canvas = scope === 'line' ? null : motionCanvas(ratio, maxSide);
+  const inCanvas = (pxPerEm, centerEm) => ({
+    ...canvas,
+    patch: { view: { centerPx: [canvas.width / 2, canvas.height / 2], pxPerEm, centerEm } },
+  });
   const fitBox = (box) => {
+    if (canvas) {
+      const { pxPerEm, centerEm } = fitInCanvas(box, canvas.width, canvas.height);
+      return inCanvas(pxPerEm, centerEm);
+    }
     const pxPerEm = Math.min(EXPORT_PX_PER_EM, maxSide / Math.max(box.width, box.height));
     const width = size(box.width * pxPerEm);
     const height = size(box.height * pxPerEm);
@@ -2678,6 +2711,15 @@ function exportFraming(live, clock, { scope, line, repeats, maxSide, wholeScale 
   }
   if (p.design === 'sticker') return fitBox(expandBox(scene.isSequence ? L.bounds : stickerBounds(scene.inkBox, p), 0.08));
   if (p.design === 'oval') return fitBox(expandBox(L.bounds, 0.08));
+  if (canvas) {
+    // Same density as on screen: the canvas's short side shows what the stage's does.
+    const v = L.view;
+    const stageCentre = [
+      v.centerEm[0] + (stage.width / 2 - v.center[0]) / v.pxPerEm,
+      v.centerEm[1] + (stage.height / 2 - v.center[1]) / v.pxPerEm,
+    ];
+    return inCanvas((Math.min(canvas.width, canvas.height) * v.pxPerEm) / Math.min(stage.width, stage.height), stageCentre);
+  }
   const scale = Math.min(wholeScale, maxSide / Math.max(stage.width, stage.height));
   return {
     width: size(stage.width * scale),
@@ -3969,6 +4011,7 @@ export default function RetroStickerWarp({
       maxSide: Math.min(limit, renderer.maxSize),
       wholeScale: kind === 'svg' ? 1 : 2,
       even: kind === 'motion',
+      ratio: kind === 'motion' ? p.motionRatio : 'fit',
     });
     const frameAt = (clock, stretch, bgAlpha) => ({
       ...frameFromLive(live, clock, stretch),
@@ -4791,6 +4834,21 @@ export default function RetroStickerWarp({
                   options={MOTION_FPS.map((f) => ({ value: f, label: `${f}` }))}
                 />
               </div>
+              {exportScope !== 'line' && (
+                <div className="space-y-1">
+                  <Segmented
+                    label="Canvas"
+                    value={params.motionRatio}
+                    onChange={(v) => update('motionRatio', v)}
+                    options={MOTION_RATIOS.map((r) => ({ value: r, label: r === 'fit' ? 'Fit' : r }))}
+                  />
+                  <p className="text-[11px] leading-relaxed text-white/55">
+                    {params.motionRatio === 'fit'
+                      ? 'Trimmed to the design.'
+                      : `${MOTION_CANVAS_PX[params.motionRatio].join(' × ')} px, ${isSticker ? 'the design centred inside' : 'filled edge to edge'}.`}
+                  </p>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"

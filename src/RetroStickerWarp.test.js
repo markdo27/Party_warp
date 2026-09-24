@@ -11,6 +11,7 @@ import {
   ITALIC_MAX,
   MAX_CHARS,
   MAX_LINES,
+  MOTION_RATIOS,
   RANGES,
   TIME_FOLD,
   alignOffset,
@@ -36,6 +37,7 @@ import {
   fileNameFor,
   fillGlyphRow,
   fillHoles,
+  fitInCanvas,
   fillStretchRow,
   foldTime,
   gaussianBlur,
@@ -52,6 +54,7 @@ import {
   mapBreaks,
   messageAlignment,
   messageFrame,
+  motionCanvas,
   messageLayout,
   messagePlan,
   motionClock,
@@ -418,6 +421,38 @@ describe('tagline typeface', () => {
     expect(originEm[1] + sizeEm[1]).toBeCloseTo(1.8, 9); // second baseline (1) + descent + pad
     // The second line's tall ascent reaches above its baseline but not above the canvas.
     expect(1 - 1.3).toBeGreaterThanOrEqual(originEm[1]);
+  });
+});
+
+describe('recording canvas', () => {
+  it('offers fit plus the common social ratios', () => {
+    expect(sanitizeParams().motionRatio).toBe('fit');
+    expect(sanitizeParams({ motionRatio: '9:16' }).motionRatio).toBe('9:16');
+    expect(sanitizeParams({ motionRatio: '3:2' }).motionRatio).toBe('fit');
+    expect(MOTION_RATIOS).toEqual(['fit', '1:1', '4:5', '9:16', '16:9']);
+  });
+
+  it('sizes each ratio at its standard resolution, scaled to fit the GPU', () => {
+    expect(motionCanvas('fit', 4096)).toBeNull();
+    expect(motionCanvas('1:1', 4096)).toEqual({ width: 1080, height: 1080 });
+    expect(motionCanvas('4:5', 4096)).toEqual({ width: 1080, height: 1350 });
+    expect(motionCanvas('9:16', 4096)).toEqual({ width: 1080, height: 1920 });
+    expect(motionCanvas('16:9', 4096)).toEqual({ width: 1920, height: 1080 });
+    const small = motionCanvas('9:16', 960);
+    expect(small.height).toBeLessThanOrEqual(960);
+    expect(small.width % 2 + small.height % 2).toBe(0); // video codecs want even sizes
+    expect(small.width / small.height).toBeCloseTo(9 / 16, 2);
+  });
+
+  it('centres a design inside the canvas with a margin all round', () => {
+    const box = { x: -2, y: -0.5, width: 4, height: 1 };
+    const { pxPerEm, centerEm } = fitInCanvas(box, 1080, 1920);
+    expect(centerEm).toEqual([0, 0]);
+    expect(box.width * pxPerEm).toBeLessThan(1080);
+    expect(box.width * pxPerEm).toBeGreaterThan(1080 * 0.7); // a wide design fills the width
+    const tall = fitInCanvas({ x: 0, y: 0, width: 1, height: 4 }, 1920, 1080);
+    expect(4 * tall.pxPerEm).toBeLessThan(1080);
+    expect(tall.centerEm).toEqual([0.5, 2]);
   });
 });
 
