@@ -38,6 +38,8 @@ import {
   fillGlyphRow,
   fillHoles,
   fitInCanvas,
+  recordFrame,
+  viewForRect,
   fillStretchRow,
   foldTime,
   gaussianBlur,
@@ -442,6 +444,30 @@ describe('recording canvas', () => {
     expect(small.height).toBeLessThanOrEqual(960);
     expect(small.width % 2 + small.height % 2).toBe(0); // video codecs want even sizes
     expect(small.width / small.height).toBeCloseTo(9 / 16, 2);
+  });
+
+  it('frames the recording on the stage: the largest rect of that ratio in the free area', () => {
+    const free = { x: 0, y: 60, width: 900, height: 600 };
+    expect(recordFrame(free, 'fit')).toBeNull();
+    const r = recordFrame(free, '9:16');
+    expect(r.width / r.height).toBeCloseTo(9 / 16, 6);
+    expect(r.height).toBeLessThan(free.height);
+    expect(r.x + r.width / 2).toBeCloseTo(450, 6); // centred
+    expect(r.y + r.height / 2).toBeCloseTo(360, 6);
+    const wide = recordFrame(free, '16:9');
+    expect(wide.width / wide.height).toBeCloseTo(16 / 9, 6);
+    expect(wide.width).toBeLessThan(free.width);
+  });
+
+  it('records exactly what the frame shows, scaled to the canvas', () => {
+    const view = { pxPerEm: 100, center: [450, 360], centerEm: [0, 0] };
+    const rect = { x: 350, y: 160, width: 225, height: 400 }; // 9:16, right of centre
+    const v = viewForRect(view, rect, { width: 1080, height: 1920 });
+    expect(v.pxPerEm).toBeCloseTo(480, 6); // 1080 / 225 × 100
+    expect(v.centerPx).toEqual([540, 960]);
+    // The rect's centre (462.5, 360) on screen is 0.125 em right of the view centre.
+    expect(v.centerEm[0]).toBeCloseTo(0.125, 9);
+    expect(v.centerEm[1]).toBeCloseTo(0, 9);
   });
 
   it('centres a design inside the canvas with a margin all round', () => {

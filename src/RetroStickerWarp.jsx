@@ -1335,6 +1335,36 @@ export function motionCanvas(ratio, maxSide) {
   return { width: even(px[0] * scale), height: even(px[1] * scale) };
 }
 
+const FRAME_INSET = 16; // CSS px between the on-stage recording frame and the free area's edge
+
+/**
+ * The recording frame on the stage (CSS px): the largest rect of the canvas ratio that fits
+ * the free area, centred. What it shows is exactly what gets recorded. null for 'fit'.
+ */
+export function recordFrame(free, ratio) {
+  const px = MOTION_CANVAS_PX[ratio];
+  if (!px) return null;
+  const availW = Math.max(1, free.width - 2 * FRAME_INSET);
+  const availH = Math.max(1, free.height - 2 * FRAME_INSET);
+  const scale = Math.min(availW / px[0], availH / px[1]);
+  const width = px[0] * scale;
+  const height = px[1] * scale;
+  return { x: free.x + (free.width - width) / 2, y: free.y + (free.height - height) / 2, width, height };
+}
+
+/** Export view that maps the on-stage frame `rect` onto the whole canvas. */
+export function viewForRect(view, rect, canvas) {
+  const scale = canvas.width / rect.width;
+  return {
+    centerPx: [canvas.width / 2, canvas.height / 2],
+    pxPerEm: view.pxPerEm * scale,
+    centerEm: [
+      view.centerEm[0] + (rect.x + rect.width / 2 - view.center[0]) / view.pxPerEm,
+      view.centerEm[1] + (rect.y + rect.height / 2 - view.center[1]) / view.pxPerEm,
+    ],
+  };
+}
+
 /** View that centres `box` (em) in a width × height canvas with a margin all round. */
 export function fitInCanvas(box, width, height) {
   const room = 1 - 2 * CANVAS_MARGIN;
@@ -2682,6 +2712,10 @@ function exportFraming(live, clock, { scope, line, repeats, maxSide, wholeScale 
     ...canvas,
     patch: { view: { centerPx: [canvas.width / 2, canvas.height / 2], pxPerEm, centerEm } },
   });
+  // The stage shows the recording frame: record exactly what it frames.
+  if (canvas && live.recordRect && L.view) {
+    return { ...canvas, patch: { view: viewForRect(L.view, live.recordRect, canvas) } };
+  }
   const fitBox = (box) => {
     if (canvas) {
       const { pxPerEm, centerEm } = fitInCanvas(box, canvas.width, canvas.height);
@@ -3332,9 +3366,16 @@ export default function RetroStickerWarp({
   const tagFont = tagFontOptions.find((f) => f.id === params.tagFontId) ?? DEFAULT_TAG_FONT;
   const tagReady = tagFontReady || Boolean(tagFont.uploaded); // uploads are loaded before they're listed
   const free = useMemo(() => computeFreeArea(stage, panelRect), [stage, panelRect]);
+  // A chosen recording ratio shows its frame on the stage; the design is laid out inside it.
+  // A single marquee line records its own strip, so it has no frame.
+  const recordsLine = DESIGN_INFO[design].line && params.exportScope === 'line';
+  const recordRect = useMemo(
+    () => (recordsLine ? null : recordFrame(free, params.motionRatio)),
+    [recordsLine, free, params.motionRatio],
+  );
   const layout = useMemo(
-    () => designLayout({ design, scene, tagBox: oneLine ? (tagScene?.inkBox ?? null) : null, params, stage, free }),
-    [design, oneLine, scene, tagScene, params, stage, free],
+    () => designLayout({ design, scene, tagBox: oneLine ? (tagScene?.inkBox ?? null) : null, params, stage, free: recordRect ?? free }),
+    [design, oneLine, scene, tagScene, params, stage, free, recordRect],
   );
   const view = layout?.view ?? null;
   const rowGeom = useMemo(
@@ -3641,6 +3682,7 @@ export default function RetroStickerWarp({
       params,
       playing,
       view,
+      recordRect,
       stage,
       scene,
       layout,
@@ -4228,6 +4270,24 @@ export default function RetroStickerWarp({
               boxShadow: `0 0 0 1.5px ${params.bg}, 0 0 18px ${ACCENT}`,
             }}
           />
+        )}
+        {recordRect && (
+          <div
+            aria-label={`Recording frame ${params.motionRatio}`}
+            role="note"
+            className="pointer-events-none absolute z-[5] rounded-[3px] outline outline-1 outline-offset-0 outline-[#ffc8f8]/80"
+            style={{
+              left: recordRect.x,
+              top: recordRect.y,
+              width: recordRect.width,
+              height: recordRect.height,
+              boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.6)',
+            }}
+          >
+            <span className="rsw-mono absolute left-2 top-2 rounded-full bg-black/70 px-2 py-0.5 text-[10px] text-[#ffc8f8]">
+              {params.motionRatio} · {MOTION_CANVAS_PX[params.motionRatio].join(' × ')}
+            </span>
+          </div>
         )}
         <div ref={selectionLayerRef}>
           {selectionBoxes.map((box, i) => (
@@ -4845,7 +4905,7 @@ export default function RetroStickerWarp({
                   <p className="text-[11px] leading-relaxed text-white/55">
                     {params.motionRatio === 'fit'
                       ? 'Trimmed to the design.'
-                      : `${MOTION_CANVAS_PX[params.motionRatio].join(' × ')} px, ${isSticker ? 'the design centred inside' : 'filled edge to edge'}.`}
+                      : `${MOTION_CANVAS_PX[params.motionRatio].join(' × ')} px. The frame on the stage shows exactly what gets recorded.`}
                   </p>
                 </div>
               )}
