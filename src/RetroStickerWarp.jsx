@@ -209,7 +209,7 @@ export const DEFAULTS = Object.freeze({
   tagFontId: 'archivo-tag',
   messageLoop: false,
   messageHold: 2.5,
-  messageMelt: 1.5,
+  messageMelt: 2,
   exportMessageLoop: true,
   caps: true,
   align: 'zigzag',
@@ -1545,7 +1545,8 @@ function messageFrame(seconds, count, hold, melt) {
   const slot = Math.max(0, seconds) / duration;
   const index = Math.floor(slot) % count;
   const progress = clamp(((slot % 1) * duration - hold) / melt, 0, 1);
-  return { index, next: (index + 1) % count, mix: progress * progress * (3 - 2 * progress) };
+  // The shader eases each drip separately, with a slight delay down the letters.
+  return { index, next: (index + 1) % count, mix: progress };
 }
 
 /** Full ink distances avoid gaps when morphing between unrelated letter shapes. */
@@ -1562,11 +1563,26 @@ function messageField(base, goo) {
   const distances = signedDistanceField(alpha, base.width, base.height);
   for (let i = 0; i < distances.length; i++) data.glyphs[i * 4] = distances[i] / base.pxPerEm;
   const b = base.inkBox;
+  const originEm = [base.originEm[0] - b.x - b.width / 2, base.originEm[1] - b.y - b.height / 2];
+  // Anchor round drips to actual ink along the lower edge, never to empty spaces.
+  const drops = new Float32Array(32);
+  for (let i = 0; i < 8; i++) {
+    const x = b.x + b.width * (i + 0.5) / 8;
+    const col = clamp(Math.round((x - base.originEm[0]) * base.pxPerEm), 0, base.width - 1);
+    for (let y = base.height - 1; y >= 0; y--) {
+      if (alpha[y * base.width + col] < 128) continue;
+      drops.set([originEm[0] + (col + 0.5) / base.pxPerEm, originEm[1] + (y + 0.5) / base.pxPerEm,
+        0.045 + 0.012 * (0.5 + 0.5 * Math.sin(i * 2.4)), (i * 0.618) % 1], i * 4);
+      break;
+    }
+  }
   return {
     width: base.width, height: base.height, data,
     body: { width: base.sil.width, height: base.sil.height },
-    originEm: [base.originEm[0] - b.x - b.width / 2, base.originEm[1] - b.y - b.height / 2],
+    originEm,
+    drops,
     sizeEm: base.sizeEm,
+    inkHeight: b.height,
   };
 }
 
@@ -1692,6 +1708,8 @@ uniform vec2 uNextSize;
 uniform vec2 uNextBodySize;
 uniform float uMessageMix;
 uniform float uMessageOn;
+uniform float uMessageHeight;
+uniform vec4 uMessageDrops[8];
 uniform sampler2D uBody;       // R: silhouette SDF, half resolution (em)
 uniform sampler2D uWarp;       // RG: displacement, B: swell, A: wobble
 uniform sampler2D uStretch;    // RG32F: display→field x offset, letter index (per row)
@@ -1890,12 +1908,41 @@ Layer tileLayer(vec2 p) {
 vec2 fieldAt(vec2 w, float row, float pivot, float t) {
   if (uMessageOn > 0.5) {
     float m = uMessageMix;
-    float liquid = 4.0 * m * (1.0 - m);
-    vec2 flow = vec2(sin(w.y * 4.3 + m * 6.283), cos(w.x * 3.7 - m * 6.283));
-    vec2 q = w + liquid * 0.24 * flow;
-    vec2 a = vec2(texture(uField, (q - uOrigin) / uSize).r, texture(uBody, (q - uOrigin) / uBodySize).r);
-    vec2 b = vec2(texture(uNextField, (q - uNextOrigin) / uNextSize).r, texture(uNextBody, (q - uNextOrigin) / uNextBodySize).r);
-    return mix(a, b, m) - liquid * vec2(0.18, 0.12);
+    // Fixed, uneven rivulets: the ink travels down instead of waving sideways.
+    float lane = 0.5 + 0.5 * sin(w.x * 10.5 + 0.8 * sin(w.x * 3.1));
+    float drip = pow(lane, 5.0);
+    float down = clamp(w.y / max(uMessageHeight, 0.3) + 0.5, 0.0, 1.0);
+    float delay = 0.15 * down + 0.05 * lane;
+    float settle = smoothstep(delay, 0.78 + delay, m);
+    float wet = sin(3.14159265 * settle);
+    float falling = wet * (0.025 + 0.12 * drip) * (0.5 + 0.5 * settle);
+    vec2 from = w - vec2(0.0, falling);
+    vec2 to = w + vec2(0.0, wet * (1.0 - settle) * (0.08 + 0.12 * drip));
+    float oldInk = texture(uField, (from - uOrigin) / uSize).r;
+    float newInk = texture(uNextField, (to - uNextOrigin) / uNextSize).r;
+    float ink = mix(oldInk, newInk, settle) - 0.018 * wet;
+    for (int i = 0; i < 8; i++) {
+      vec4 drop = uMessageDrops[i];
+      float phase = smoothstep(0.02 + 0.10 * drop.w, 0.88 + 0.10 * drop.w, m);
+      float life = sin(3.14159265 * phase);
+      if (drop.z > 0.0 && life > 0.001) {
+        float fall = 0.34 * phase;
+        vec2 head = drop.xy + vec2(0.0, fall);
+        float bead = length(w - head) - drop.z * life;
+        float neckWidth = 0.018 * life * (1.0 - smoothstep(0.35, 0.8, phase));
+        vec2 neck = vec2(drop.x, clamp(w.y, drop.y - 0.025, head.y));
+        float tether = length(w - neck) - neckWidth;
+        float dropInk = smin(bead, tether, 0.035 * life, 1.0) + 0.06 * (1.0 - life);
+        // Let the new shape absorb the drop as it settles.
+        ink = smin(ink, dropInk, 0.045 * life, life);
+      }
+    }
+    // The backing follows calmly; it must not amplify the small letter drips.
+    float bodyMix = smoothstep(0.08, 0.94, m);
+    vec2 bodyPoint = w - vec2(0.0, 0.035 * sin(3.14159265 * bodyMix));
+    float oldBody = texture(uBody, (bodyPoint - uOrigin) / uBodySize).r;
+    float newBody = texture(uNextBody, (bodyPoint - uNextOrigin) / uNextBodySize).r;
+    return vec2(ink, mix(oldBody, newBody, bodyMix));
   }
   float glyph = glyphAt(w, row, pivot, t);
   float body = texture(uBody, (vec2(bodyX(w, row), w.y) - uOrigin) / uBodySize).r;
@@ -2102,6 +2149,7 @@ const PALETTE_UNIFORMS = [
 ];
 
 const ZERO4 = [0, 0, 0, 0];
+const NO_MESSAGE_DROPS = new Float32Array(32);
 
 // Stand-in tagline field: one texel "far away" from any ink.
 const NO_TAG = Object.freeze({ width: 1, height: 1, originEm: [0, 0], sizeEm: [1, 1], data: new Float32Array([1000]) });
@@ -2281,6 +2329,8 @@ function createRenderer(canvas) {
     gl.uniform2fv(u('uNextBodySize'), next.bodySizeEm);
     gl.uniform1f(u('uMessageOn'), frame.message && messageFields.length > 1 ? 1 : 0);
     gl.uniform1f(u('uMessageMix'), frame.message?.mix ?? 0);
+    gl.uniform1f(u('uMessageHeight'), Math.max(field.inkHeight ?? 1, next.inkHeight ?? 1));
+    gl.uniform4fv(u('uMessageDrops[0]'), field.drops ?? NO_MESSAGE_DROPS);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, warpTex);
     gl.uniform1i(u('uWarp'), 1);
@@ -4202,7 +4252,7 @@ export default function RetroStickerWarp({
               {design === 'sticker' && !logo && (
                 <div className="space-y-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
                   <Toggle label="Melt between messages" checked={params.messageLoop} onChange={(v) => { update('messageLoop', v); setTyping(false); }} />
-                  <p className="text-[11px] leading-relaxed text-white/55">Loop two or three messages with a liquid transition.</p>
+                  <p className="text-[11px] leading-relaxed text-white/55">Letters soften into small drips and settle into the next message.</p>
                   {sequenceEnabled && <>
                     {extraMessages.map((message, i) => (
                       <div key={i} className="space-y-1.5">
