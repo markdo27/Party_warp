@@ -1,6 +1,7 @@
 import { defineConfig } from '@playwright/test';
 
-const PORT = 5178;
+// PW_PORT picks another port when 5178 is taken by something else.
+const PORT = Number(process.env.PW_PORT ?? 5178);
 
 export default defineConfig({
   testDir: './e2e',

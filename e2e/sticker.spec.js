@@ -327,7 +327,7 @@ test('marquee variation tiles scrolling bands with a tagline', async ({ page }) 
   await expect(page.getByRole('img', { name: /Scrolling marquee reading: UNIDENTIFIED DANCING OBJECTS — 29 — 31 august 2026/ })).toBeAttached();
   await expect(page.getByRole('radio', { name: 'Marquee' })).toBeChecked();
 
-  const tagline = page.getByLabel('Tagline');
+  const tagline = page.getByLabel('Tagline', { exact: true });
   await tagline.fill('open air\n2026');
   await expect(page.getByRole('img', { name: /— open air 2026$/ })).toBeAttached();
   await page.waitForTimeout(400);
@@ -577,4 +577,34 @@ test('goo melts the letters of each word together but keeps words apart', async 
   expect(clean).toBeGreaterThanOrEqual(24); // 27 letters, a couple touching at most
   expect(gooey).toBeLessThan(clean / 2);
   expect(gooey).toBeGreaterThanOrEqual(3); // three words never merge into one
+});
+
+test('the tagline takes its own typeface, including uploads', async ({ page }) => {
+  await page.getByRole('radio', { name: 'Marquee' }).click();
+  const tagFaces = page.getByRole('radiogroup', { name: 'Tagline typeface' }).getByRole('radio');
+  await expect(tagFaces).toHaveCount(1);
+  await expect(tagFaces.first()).toHaveAccessibleName(/Archivo/);
+  await expect(tagFaces.first()).toBeChecked();
+  await freezeWarp(page);
+  await setRange(page, 'Stretch', 0);
+  await setRange(page, 'Italic', 0);
+  await setRange(page, 'Scroll', 0);
+  await page.waitForTimeout(300);
+  const before = await stageShot(page);
+
+  await page.getByLabel('Upload a tagline font file').setInputFiles(await fetchFontFile(page));
+  await expect(page.getByText('Tagline uses “MyDisplay”')).toBeVisible();
+  await expect(tagFaces).toHaveCount(2);
+  await expect(page.getByRole('radiogroup', { name: 'Tagline typeface' }).getByRole('radio', { name: /MyDisplay/ })).toBeChecked();
+  // The sticker keeps its own face, and the upload is offered there too.
+  const faces = page.getByRole('radiogroup', { name: 'Typeface', exact: true }).getByRole('radio');
+  await expect(faces).toHaveCount(2);
+  await expect(faces.first()).toBeChecked();
+  await page.waitForTimeout(400);
+  expect(await visibleChange(page, before, await stageShot(page))).toBeGreaterThan(300);
+
+  // Removing the upload hands the tagline back to Archivo.
+  await page.getByRole('button', { name: 'Remove MyDisplay' }).click();
+  await expect(tagFaces).toHaveCount(1);
+  await expect(tagFaces.first()).toBeChecked();
 });
