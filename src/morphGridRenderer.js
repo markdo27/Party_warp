@@ -9,8 +9,8 @@ import { MORPH_CELLS, MORPH_COLS, MORPH_ROWS, MORPH_RINGS_PER_STAGE, MORPH_THEME
 const GLYPH_W = 192; // field size of one cell, px (4:5 like the cell)
 const GLYPH_H = 240;
 const GLYPH_MARGIN = 0.07; // share of the cell kept clear around a glyph
-const HALO_MAX = 0.12; // widest ring stack, in cell heights
-const REST_FRINGE = 0.01; // thin colour fringe left at rest, in cell heights
+const HALO_MAX = 0.16; // widest ring stack, in cell heights
+const REST_FRINGE = 0; // no colour fringe at rest: a glyph that is not changing stays clean
 const RING_STEP = 0.024; // width of one flat ring, in cell heights
 const BLOB = 0.02; // extra swell mid-melt, in cell heights
 const SCAN_LINES = 46; // scanlines per cell height
@@ -65,7 +65,7 @@ void main() {
   vec4 tint = uTints[tstage % 4];
   vec3 col = mix(uBg, tint.rgb, tint.a * b.x);
 
-  // Flat rings around the outline: a thin fringe at rest, up to HALO_MAX while melting.
+  // Flat rings around the outline, up to HALO_MAX while melting; none at rest.
   float width = uFringe + ${HALO_MAX} * uHaloScale * a.w;
   int stage = int((m < 0.5 ? a.x : a.y) + 0.5);
   if (d > 0.0 && d < width + aa) {

@@ -130,3 +130,27 @@ describe('accessibility limits', () => {
     });
   });
 });
+
+describe('stage colour (QA round 1 fixes)', () => {
+  const H = 0.95;
+  const M = 0.7;
+  const slot = H + M;
+  it('a glyph with no hold rings is clean mid-hold (no rest fringe)', () => {
+    expect(morphCellState(0.6, 4, H, M).halo).toBe(0); // R mid-hold
+    expect(morphCellState(slot + 0.6, 4, H, M).halo).toBe(0); // a mid-hold
+  });
+  it('u keeps a ring stack through the middle of its hold', () => {
+    expect(morphCellState(2 * slot + 0.6, 4, H, M).halo).toBeGreaterThan(0.4);
+  });
+  it('the double arch (m) floods its cell purple as it arrives, then clears early in the hold', () => {
+    expect(MORPH_THEME.stages[3].tint).toBe('#8079da');
+    const arriving = morphCellState(3 * slot - 0.01, 4, H, M);
+    expect(arriving).toMatchObject({ tintStage: 3, melting: true });
+    expect(arriving.tint).toBeGreaterThan(0.95);
+    expect(morphCellState(3 * slot + 0.01, 4, H, M).tint).toBeGreaterThan(0.95);
+    expect(morphCellState(3 * slot + 0.5, 4, H, M).tint).toBe(0);
+  });
+  it('tint stays within the flash limit', () => {
+    expect(tintSwitchesPerSecond(4, H, M)).toBeLessThanOrEqual(3);
+  });
+});
