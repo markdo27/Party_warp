@@ -12,7 +12,7 @@ export function mapCameraError(err) {
   const name = err?.name ?? '';
   if (['NotAllowedError', 'SecurityError', 'PermissionDeniedError'].includes(name)) return 'denied';
   if (['NotFoundError', 'OverconstrainedError', 'DevicesNotFoundError'].includes(name)) return 'no-camera';
-  if (['NotReadableError', 'TrackStartError', 'AbortError'].includes(name)) return 'busy';
+  if (['NotReadableError', 'TrackStartError'].includes(name)) return 'busy';
   return 'camera-error';
 }
 

@@ -17,16 +17,16 @@ export const COUNT_LIMITS = {
 
 export const PRESETS = {
   default: { label: 'Default', counts: { eye: 6, nose: 0, mouth: 3, cheek: 0 }, glitch: 0.3 },
-  ref: { label: 'Ref', counts: { eye: 10, nose: 4, mouth: 6, cheek: 3 }, glitch: 0.6 },
+  ref: { label: 'Ref', counts: { eye: 10, nose: 4, mouth: 6, cheek: 4 }, glitch: 0.6 },
   minimal: { label: 'Minimal', counts: { eye: 2, nose: 0, mouth: 1, cheek: 0 }, glitch: 0 },
 };
 
 /** Placement zones (visual spec B4). Copies' centres must stay inside. */
 export const ZONES = {
   eye: { u: [-1.15, 1.15], v: [-0.95, 0.45], scale: [0.85, 1.25], rot: 12, overlap: 0.35 },
-  nose: { u: [-0.55, 0.55], v: [0.3, 0.95], scale: [0.9, 1.15], rot: 6, overlap: 0.5, rows: [0.45, 0.8] },
-  mouth: { u: [-1.25, 1.25], v: [0.9, 1.95], scale: [0.9, 1.4], rot: 10, overlap: 0.45 },
-  cheek: { u: [-1.45, 1.45], v: [0.5, 1.3], scale: [0.9, 1.1], rot: 8, overlap: 1 },
+  nose: { u: [-0.55, 0.55], v: [0.3, 0.95], scale: [0.95, 1.2], rot: 6, overlap: 0.35, rows: [0.42, 0.78] },
+  mouth: { u: [-1.25, 1.25], v: [0.9, 1.95], scale: [0.95, 1.4], rot: 10, overlap: 0.45 },
+  cheek: { u: [-1.45, 1.45], v: [0.5, 1.3], scale: [0.95, 1.2], rot: 10, overlap: 0.35 },
 };
 
 /** Nominal sizes in IOD, only used to judge overlap while placing. */
@@ -34,7 +34,7 @@ const NOMINAL = {
   eye: { w: 0.8, h: 0.55 },
   nose: { w: 0.6, h: 0.55 },
   mouth: { w: 1.2, h: 0.5 },
-  cheek: { w: 0.55, h: 0.7 },
+  cheek: { w: 0.78, h: 0.48 },
 };
 
 /** Where the kept originals sit on an average face, for overlap checks only. */
@@ -49,9 +49,9 @@ const MAX_TRIES = 30;
 const SKEW_SHARE = 0.4;
 const SKEW_DEG = [8, 20];
 const EDGES = ['top', 'right', 'bottom', 'left'];
-const MOUTH_WAVE = { amp: 0.12, period: 1.6, rows: [1.0, 1.82] };
-const CHEEK_OUT = [0.1, 0.3];
-const CHEEK_BASE_U = 0.95;
+const MOUTH_WAVE = { amp: 0.16, period: 1.5, rows: [1.0, 1.82] };
+const CHEEK_OUT = [0.12, 0.3];
+const CHEEK_BASE_U = 1.12;
 
 export const clampCount = (kind, n) => {
   const { min, max } = COUNT_LIMITS[kind];
@@ -71,10 +71,12 @@ const box = (kind, u, v, scale) => ({ u, v, w: NOMINAL[kind].w * scale, h: NOMIN
 function proposePosition(kind, i, rand) {
   const z = ZONES[kind];
   if (kind === 'nose') {
-    return { u: range(rand, z.u[0], z.u[1]), v: z.rows[i % z.rows.length] + range(rand, -0.06, 0.06) };
+    const col = i % 2 === 0 ? [-0.52, -0.04] : [0.04, 0.52];
+    const row = Math.floor(i / 2) % z.rows.length;
+    return { u: range(rand, col[0], col[1]), v: z.rows[row] + range(rand, -0.05, 0.05) };
   }
   if (kind === 'mouth') {
-    const u = range(rand, -1.1, 1.1);
+    const u = range(rand, -1.18, 1.18);
     const row = range(rand, MOUTH_WAVE.rows[0], MOUTH_WAVE.rows[1]);
     const v = row + MOUTH_WAVE.amp * Math.sin((2 * Math.PI * u) / MOUTH_WAVE.period);
     return { u, v: Math.min(z.v[1], Math.max(z.v[0], v)) };
@@ -135,6 +137,7 @@ function placeCopies(kind, seed, total, placed) {
       flipX: kind === 'eye' && attr() < 0.25,
       cut: makeCut(attr, kind),
       shadowEdge: EDGES[Math.floor(attr() * 4)],
+      shade: range(attr, -0.06, 0.06),
     });
   }
   return out;
@@ -160,6 +163,7 @@ export function makeLayout({ seed, counts }) {
     flipX: false,
     cut: { kind: 'rect' },
     shadowEdge: 'bottom',
+    shade: 0,
   }));
   // Full max-length lists sliced to the count, so changing a count never moves the others.
   const eyes = placeCopies('eye', seed, COUNT_LIMITS.eye.max - 2, originals).slice(0, n.eye - 2);

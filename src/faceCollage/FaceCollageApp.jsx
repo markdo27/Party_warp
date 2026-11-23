@@ -33,6 +33,8 @@ export default function FaceCollageApp() {
   const trackerRef = useRef(null);
   const streamRef = useRef(null);
   const recRef = useRef(null);
+  const sessionRef = useRef(0);
+  const screenRef = useRef('intro');
   const [screen, setScreen] = useState('intro'); // intro | loading | active | stopped | error
   const [errorKind, setErrorKind] = useState(null);
   const [progress, setProgress] = useState(0);
@@ -49,12 +51,21 @@ export default function FaceCollageApp() {
   const [notice, setNotice] = useState('');
   const [hud, setHud] = useState(null);
 
-  const fail = useCallback((kind) => {
-    setErrorKind(kind);
-    setScreen('error');
+  const setScreenSynced = useCallback((next) => {
+    screenRef.current = next;
+    setScreen(next);
   }, []);
 
+  const fail = useCallback(
+    (kind) => {
+      setErrorKind(kind);
+      setScreenSynced('error');
+    },
+    [setScreenSynced],
+  );
+
   const releaseCamera = useCallback(() => {
+    sessionRef.current += 1;
     recRef.current?.stop();
     engineRef.current?.stop();
     stopStream(streamRef.current);
@@ -83,73 +94,106 @@ export default function FaceCollageApp() {
       const unsupported = cameraSupport();
       if (unsupported) return fail(unsupported);
       releaseCamera();
-      setScreen('loading');
+      const runId = sessionRef.current;
+      setErrorKind(null);
+      setScreenSynced('loading');
       setMode('camera');
       let stream;
       try {
         stream = await openCamera({ deviceId: wantedId ?? undefined });
       } catch (err) {
+        if (sessionRef.current !== runId) return undefined;
         return fail(mapCameraError(err));
+      }
+      if (sessionRef.current !== runId) {
+        stopStream(stream);
+        return undefined;
       }
       streamRef.current = stream;
       let engine;
       try {
         engine = await ensureEngine();
       } catch (err) {
+        if (sessionRef.current !== runId) {
+          stopStream(stream);
+          return undefined;
+        }
         console.error('[face-collage] model failed', err);
         releaseCamera();
         return fail('model-error');
       }
-      if (streamRef.current !== stream) return undefined; // stopped while loading
+      if (sessionRef.current !== runId || streamRef.current !== stream) {
+        stopStream(stream);
+        return undefined;
+      }
       const video = videoRef.current;
       video.srcObject = stream;
       try {
         await video.play();
       } catch (err) {
+        if (sessionRef.current !== runId) {
+          stopStream(stream);
+          return undefined;
+        }
         releaseCamera();
         return fail(mapCameraError(err));
       }
-      setCameras(await listCameras());
+      if (sessionRef.current !== runId) {
+        stopStream(stream);
+        return undefined;
+      }
+      const listed = await listCameras();
+      if (sessionRef.current !== runId) {
+        stopStream(stream);
+        return undefined;
+      }
+      setCameras(listed);
       engine.start(video, { mirror: isFrontFacing(stream) });
-      setScreen('active');
+      setScreenSynced('active');
       return undefined;
     },
-    [deviceId, ensureEngine, fail, releaseCamera],
+    [deviceId, ensureEngine, fail, releaseCamera, setScreenSynced],
   );
 
   const startPhoto = useCallback(
     async (file) => {
       if (!file) return;
       releaseCamera();
-      setScreen('loading');
+      const runId = sessionRef.current;
+      setErrorKind(null);
+      setScreenSynced('loading');
       setMode('photo');
       const img = new Image();
       const url = URL.createObjectURL(file);
       try {
         img.src = url;
         await img.decode();
+        if (sessionRef.current !== runId) return;
         const engine = await ensureEngine();
+        if (sessionRef.current !== runId) return;
         engine.start(img, { mirror: false });
-        setScreen('active');
+        setScreenSynced('active');
       } catch (err) {
+        if (sessionRef.current !== runId) return;
         console.error('[face-collage] photo failed', err);
         fail(trackerRef.current ? 'photo-error' : 'model-error');
       } finally {
         URL.revokeObjectURL(url);
       }
     },
-    [ensureEngine, fail, releaseCamera],
+    [ensureEngine, fail, releaseCamera, setScreenSynced],
   );
 
   const stopAll = useCallback(() => {
     releaseCamera();
+    setErrorKind(null);
     setRecording(false);
-    setScreen('stopped');
-  }, [releaseCamera]);
+    setScreenSynced('stopped');
+  }, [releaseCamera, setScreenSynced]);
 
   // Release the camera when the tab is hidden or the demo unmounts (foundation D4).
   useEffect(() => {
-    const onHide = () => document.visibilityState === 'hidden' && streamRef.current && stopAll();
+    const onHide = () => document.visibilityState === 'hidden' && (streamRef.current || screenRef.current === 'loading') && stopAll();
     document.addEventListener('visibilitychange', onHide);
     window.addEventListener('pagehide', releaseCamera);
     return () => {
@@ -288,6 +332,17 @@ export default function FaceCollageApp() {
           {DEBUG && hud && <pre className="fc-hud">{JSON.stringify({ ...hud, patches: hud.patches.length, timeline: hud.timeline.slice(-4) }, null, 1)}</pre>}
         </section>
         <aside className="fc-controls" aria-label="Collage controls">
+          <button type="button" className="fc-btn fc-stop" onClick={stopAll} disabled={!active && screen !== 'loading'} data-testid="fc-stop">Stop camera</button>
+          <div className="fc-row">
+            <button type="button" className="fc-btn" onClick={savePng} disabled={!active}>PNG</button>
+            <button type="button" className="fc-btn" onClick={toggleRecord} disabled={!active} aria-pressed={recording}>{recording ? 'Stop rec' : 'Record'}</button>
+          </div>
+          {mode === 'camera' && cameras.length > 1 && active && <button type="button" className="fc-btn" onClick={switchCamera}>Switch camera</button>}
+          <div className="fc-row">
+            <button type="button" className="fc-btn" onClick={reroll} data-testid="fc-random">Random</button>
+            <input className="fc-seed" value={seedText} onChange={(e) => setSeedText(e.target.value)} onBlur={commitSeed} onKeyDown={(e) => e.key === 'Enter' && commitSeed()} aria-label="Seed" maxLength={6} data-testid="fc-seed" />
+          </div>
+          {notice && <p className="fc-small" role="status">{notice}</p>}
           <label className="fc-field">
             <span>Preset</span>
             <select value={preset} onChange={(e) => applyPreset(e.target.value)}>
@@ -298,24 +353,13 @@ export default function FaceCollageApp() {
           {COUNT_KEYS.map(([kind, label]) => (
             <label key={kind} className="fc-field">
               <span>{label} <output>{counts[kind]}</output></span>
-              <input type="range" min={COUNT_LIMITS[kind].min} max={COUNT_LIMITS[kind].max} step="1" value={counts[kind]} onChange={(e) => setCount(kind, e.target.value)} data-testid={`fc-count-${kind}`} />
+              <input type="range" aria-label={label} min={COUNT_LIMITS[kind].min} max={COUNT_LIMITS[kind].max} step="1" value={counts[kind]} onChange={(e) => setCount(kind, e.target.value)} data-testid={`fc-count-${kind}`} />
             </label>
           ))}
           <label className="fc-field">
             <span>Glitch <output>{Math.round(glitch * 100)}</output></span>
-            <input type="range" min="0" max="100" step="1" value={Math.round(glitch * 100)} onChange={(e) => { setPreset('custom'); setGlitch(Number(e.target.value) / 100); }} />
+            <input type="range" aria-label="Glitch" min="0" max="100" step="1" value={Math.round(glitch * 100)} onChange={(e) => { setPreset('custom'); setGlitch(Number(e.target.value) / 100); }} />
           </label>
-          <div className="fc-row">
-            <button type="button" className="fc-btn" onClick={reroll} data-testid="fc-random">Random</button>
-            <input className="fc-seed" value={seedText} onChange={(e) => setSeedText(e.target.value)} onBlur={commitSeed} onKeyDown={(e) => e.key === 'Enter' && commitSeed()} aria-label="Seed" maxLength={6} data-testid="fc-seed" />
-          </div>
-          <div className="fc-row">
-            <button type="button" className="fc-btn" onClick={savePng} disabled={!active}>PNG</button>
-            <button type="button" className="fc-btn" onClick={toggleRecord} disabled={!active} aria-pressed={recording}>{recording ? 'Stop rec' : 'Record'}</button>
-          </div>
-          {mode === 'camera' && cameras.length > 1 && active && <button type="button" className="fc-btn" onClick={switchCamera}>Switch camera</button>}
-          <button type="button" className="fc-btn fc-stop" onClick={stopAll} disabled={!active && screen !== 'loading'} data-testid="fc-stop">Stop camera</button>
-          {notice && <p className="fc-small" role="status">{notice}</p>}
         </aside>
       </main>
     </div>

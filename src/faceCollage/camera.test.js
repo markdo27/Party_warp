@@ -11,7 +11,7 @@ describe('camera', () => {
     expect(cameraSupport({ isSecureContext: true, navigator: { mediaDevices: { getUserMedia() {} } } })).toBeNull();
   });
   it('maps browser errors to screens that have copy', () => {
-    const cases = { NotAllowedError: 'denied', NotFoundError: 'no-camera', NotReadableError: 'busy', TypeError: 'camera-error' };
+    const cases = { NotAllowedError: 'denied', NotFoundError: 'no-camera', NotReadableError: 'busy', AbortError: 'camera-error', TypeError: 'camera-error' };
     for (const [name, screen] of Object.entries(cases)) {
       expect(mapCameraError({ name })).toBe(screen);
       expect(ERROR_COPY[screen]).toBeDefined();

@@ -171,3 +171,27 @@ test('reduced motion: no glitch bands, collage still drawn', async ({ browser })
   expect(s.bands).toBe(0);
   await context.close();
 });
+
+test('stop during camera startup does not show a false busy error', async ({ page }) => {
+  test.setTimeout(60_000);
+  const httpErrors = [];
+  page.on('response', (r) => r.status() >= 400 && httpErrors.push(`${r.status()} ${r.url()}`));
+  await page.addInitScript(() => {
+    const md = navigator.mediaDevices;
+    const orig = md.getUserMedia.bind(md);
+    window.__fcRaceStreams = [];
+    md.getUserMedia = async (c) => {
+      const s = await orig(c);
+      window.__fcRaceStreams.push(s);
+      return s;
+    };
+  });
+  await page.goto(URL_);
+  await page.getByRole('button', { name: 'Start camera' }).click();
+  await page.getByTestId('fc-stop').click();
+  await page.waitForTimeout(2500);
+  expect(await ui(page)).toMatchObject({ screen: 'stopped', errorKind: null });
+  const live = await page.evaluate(() => window.__fcRaceStreams.flatMap((s) => s.getTracks()).filter((t) => t.readyState === 'live').length);
+  expect(live).toBe(0);
+  expect(httpErrors).toEqual([]);
+});

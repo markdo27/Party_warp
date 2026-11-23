@@ -30,7 +30,7 @@ export const CROP = {
   eye: { w: 0.8, h: 0.55, lift: 0.08 },
   nose: { w: 0.6, h: 0.55 },
   mouth: { widthFactor: 1.35, minH: 0.5, heightFactor: 1.4 },
-  cheek: { w: 0.55, h: 0.7 },
+  cheek: { w: 0.78, h: 0.48 },
 };
 
 const mean = (pts) => {

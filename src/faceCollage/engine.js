@@ -43,6 +43,8 @@ export class CollageEngine {
     this.params = { seed: 1, counts: { eye: 6, nose: 0, mouth: 3, cheek: 0 }, glitch: 0.3 };
     this.layout = makeLayout(this.params);
     this.source = null;
+    this.isStill = false;
+    this.stillFace = null;
     this.mirror = false;
     this.raf = 0;
     this.running = false;
@@ -68,6 +70,8 @@ export class CollageEngine {
   start(source, { mirror }) {
     this.stop();
     this.source = source;
+    this.isStill = typeof HTMLImageElement !== 'undefined' && source instanceof HTMLImageElement;
+    this.stillFace = null;
     this.mirror = mirror;
     const { w, h } = sourceSize(source);
     const out = fitSize(w, h);
@@ -118,6 +122,7 @@ export class CollageEngine {
   }
 
   detect(t) {
+    if (this.isStill && this.stillFace) return this.stillFace;
     const s = this.stats;
     if (s.skipNext) {
       s.skipNext = false;
@@ -130,10 +135,13 @@ export class CollageEngine {
     s.skipNext = s.detectMs > SLOW_DETECT_MS;
     if (!lm) return null;
     // The detect canvas is already mirrored, so landmarks map straight onto the frame canvas.
-    return measureFace(toPixels(lm, this.frameCanvas.width, this.frameCanvas.height, false));
+    const measured = measureFace(toPixels(lm, this.frameCanvas.width, this.frameCanvas.height, false));
+    if (this.isStill && measured) this.stillFace = measured;
+    return measured;
   }
 
   smooth(raw, t) {
+    if (this.isStill) return raw;
     const sec = t / 1000;
     const frame = arrayToFrame(this.frameFilter.filter(frameToArray(raw.frame), sec));
     const features = arrayToFeatures(this.featureFilter.filter(featuresToArray(raw.features), sec));

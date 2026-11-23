@@ -8,17 +8,20 @@
 import { cutPolygon } from './layout.js';
 import { frameMatrix, toPixel } from './faceFrame.js';
 import { glitchBands } from './glitch.js';
+import { mulberry32 } from './prng.js';
 import { easeOut } from './trackingState.js';
 
 const PLATE_GRID = 32; // working size of the skin plate before blurring
-const PLATE_BLUR_GRID = 7; // ~0.35 IOD blur radius on a typical face
-const PLATE_BRIGHTEN = 'rgba(255,255,255,0.14)'; // ~+0.3 EV via screen
-const FEATHER_IOD = 0.08;
-const SHADOW_PX = 1.5;
-const SHADOW_COLOR = 'rgba(0,0,0,0.15)';
+const PLATE_BLUR_GRID = 8; // ~0.35 IOD blur radius on a typical face
+const PLATE_BRIGHTEN = 'rgba(255,248,240,0.10)'; // warm ~+0.25 EV lift
+const FEATHER_IOD = 0.10;
+const OVAL_INSET = 1.0; // full face oval so forehead/cheeks flatten cleanly while shadowBlur feathers the edge
+const SEAM_PX = 1;
+const SEAM_COLOR = 'rgba(0,0,0,0.16)';
 const BG_BLUR_DIV = 18;
 const GRAIN_SIZE = 192;
-const GRAIN_ALPHA = 0.06;
+const GRAIN_SEED = 0x46434752;
+const GRAIN_ALPHA = 0.08;
 const GRAIN_SLOT_MS = 120;
 const ADD_ANIM_MS = 150;
 const COVER = {
@@ -49,11 +52,12 @@ function pathPoly(ctx, pts) {
 const EDGE_INDEX = { top: [0, 1], right: [1, 2], bottom: [2, 3], left: [3, 0] };
 
 function makeGrain() {
+  const rand = mulberry32(GRAIN_SEED);
   const c = make(GRAIN_SIZE, GRAIN_SIZE);
   const g = ctx2d(c);
   const img = g.createImageData(GRAIN_SIZE, GRAIN_SIZE);
   for (let i = 0; i < img.data.length; i += 4) {
-    const v = Math.floor(Math.random() * 256);
+    const v = Math.floor(rand() * 256);
     img.data[i] = v;
     img.data[i + 1] = v;
     img.data[i + 2] = v;
@@ -150,14 +154,20 @@ export class CollageRenderer {
     cctx.transform(...Finv);
     cctx.drawImage(source, 0, 0, this.collage.width, this.collage.height);
     cctx.restore();
-    // Thin darker line on one edge, inside the cut, so the paste reads as a paste.
-    const [i, j] = EDGE_INDEX[p.shadowEdge] ?? EDGE_INDEX.bottom;
-    cctx.beginPath();
-    cctx.moveTo(...pts[i]);
-    cctx.lineTo(...pts[j]);
-    cctx.lineWidth = (SHADOW_PX * 2) / (face.frame.iod * s);
-    cctx.strokeStyle = SHADOW_COLOR;
-    cctx.stroke();
+    // Subtle deterministic brightness jitter (±6%) and 1 px paste seam on copies so overlaps read clearly.
+    if (!p.original) {
+      if (p.shade) {
+        cctx.fillStyle = p.shade > 0 ? `rgba(255,255,255,${p.shade.toFixed(3)})` : `rgba(0,0,0,${(-p.shade).toFixed(3)})`;
+        cctx.fillRect(-f.w, -f.h, f.w * 2, f.h * 2);
+      }
+      const [i, j] = EDGE_INDEX[p.shadowEdge] ?? EDGE_INDEX.bottom;
+      cctx.beginPath();
+      cctx.moveTo(...pts[i]);
+      cctx.lineTo(...pts[j]);
+      cctx.lineWidth = (SEAM_PX * 2) / (face.frame.iod * s);
+      cctx.strokeStyle = SEAM_COLOR;
+      cctx.stroke();
+    }
     cctx.restore();
   }
 
@@ -182,10 +192,6 @@ export class CollageRenderer {
     const cheek = this.sampleCheeks(features, frame, toSmall);
     // Everything outside the oval becomes skin too, so background never bleeds into the blur.
     sctx.save();
-    sctx.setTransform(...toSmall);
-    pathPoly(sctx, ovalPx.map((p) => [p.x, p.y]));
-    sctx.restore();
-    sctx.save();
     sctx.fillStyle = cheek.mid;
     sctx.beginPath();
     sctx.rect(0, 0, G, G);
@@ -205,15 +211,18 @@ export class CollageRenderer {
     pctx.globalCompositeOperation = 'screen';
     pctx.fillStyle = PLATE_BRIGHTEN;
     pctx.fillRect(bx, by, bw, bh);
-    // Soft oval mask via the shadow trick: the shape is drawn off-canvas, only its blurred shadow lands.
+    // Soft oval mask via the shadow trick: pulled slightly inward so the feather fades cleanly inside the hairline/jaw.
+    const cx = ovalPx.reduce((a, p) => a + p.x, 0) / ovalPx.length;
+    const cy = ovalPx.reduce((a, p) => a + p.y, 0) / ovalPx.length;
+    const insetOval = ovalPx.map((p) => [cx + (p.x - cx) * OVAL_INSET, cy + (p.y - cy) * OVAL_INSET]);
     mctx.clearRect(0, 0, W, H);
     mctx.save();
     const off = W + bw + 100;
     mctx.shadowColor = '#fff';
-    mctx.shadowBlur = Math.max(2, FEATHER_IOD * frame.iod * 2);
+    mctx.shadowBlur = Math.max(4, FEATHER_IOD * frame.iod * 2.2);
     mctx.shadowOffsetX = off;
     mctx.fillStyle = '#fff';
-    pathPoly(mctx, ovalPx.map((p) => [p.x - off, p.y]));
+    pathPoly(mctx, insetOval.map(([x, y]) => [x - off, y]));
     mctx.fill();
     mctx.restore();
     pctx.globalCompositeOperation = 'destination-in';
@@ -272,12 +281,15 @@ export class CollageRenderer {
     }
     const bands = glitchBands({ seed, timeMs: now, intensity: glitch * alpha, height: H, avoid: avoidRows, reducedMotion });
     for (const band of bands) this.slipBand(band, W);
-    const slot = reducedMotion ? 0 : Math.floor(now / GRAIN_SLOT_MS);
-    octx.globalCompositeOperation = 'overlay';
-    octx.globalAlpha = GRAIN_ALPHA;
-    const gx = (slot * 73) % GRAIN_SIZE;
-    const gy = (slot * 151) % GRAIN_SIZE;
-    for (let y = -gy; y < H; y += GRAIN_SIZE) for (let x = -gx; x < W; x += GRAIN_SIZE) octx.drawImage(this.grain, x, y);
+    const grainAmt = glitch * alpha;
+    if (grainAmt > 0) {
+      const slot = reducedMotion ? 0 : Math.floor(now / GRAIN_SLOT_MS);
+      octx.globalCompositeOperation = 'overlay';
+      octx.globalAlpha = GRAIN_ALPHA * (0.4 + 0.6 * grainAmt);
+      const gx = ((seed ^ Math.imul(slot, 73)) >>> 0) % GRAIN_SIZE;
+      const gy = ((seed ^ Math.imul(slot, 151)) >>> 0) % GRAIN_SIZE;
+      for (let y = -gy; y < H; y += GRAIN_SIZE) for (let x = -gx; x < W; x += GRAIN_SIZE) octx.drawImage(this.grain, x, y);
+    }
     octx.globalCompositeOperation = 'source-over';
     octx.globalAlpha = 1;
     return bands;
