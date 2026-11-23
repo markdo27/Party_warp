@@ -1,5 +1,5 @@
 /**
- * Morph grid: a 3 × 3 grid of single glyphs that hold, then melt into the next glyph of a
+ * Morph grid: a grid (3 × 3 by default, up to 6 × 6) of single glyphs that hold, then melt into the next glyph of a
  * short loop. Cells run the same loop with a time lag (one step per column, a bigger one per
  * row), so a wave runs from the top-left cell to the bottom-right one. Around a glyph that is
  * changing, flat colour rings follow its outline (iso-distance bands) and swell with the
@@ -10,9 +10,13 @@
  * morphGridRenderer.js.
  */
 
-export const MORPH_COLS = 3;
-export const MORPH_ROWS = 3;
-export const MORPH_CELLS = MORPH_COLS * MORPH_ROWS;
+export const DEFAULT_MORPH_COLS = 3;
+export const DEFAULT_MORPH_ROWS = 3;
+export const MORPH_MIN_COLS = 1;
+export const MORPH_MIN_ROWS = 1;
+export const MORPH_MAX_COLS = 6;
+export const MORPH_MAX_ROWS = 6;
+export const MORPH_MAX_CELLS = MORPH_MAX_COLS * MORPH_MAX_ROWS;
 export const MORPH_CELL_ASPECT = 240 / 300; // cell width / height, as in the reference grid
 export const MORPH_MAX_GLYPHS = 6;
 export const MORPH_MIN_GLYPHS = 2;
@@ -55,6 +59,19 @@ const smoothstep = (a, b, x) => {
   return t * t * (3 - 2 * t);
 };
 const mod = (x, m) => ((x % m) + m) % m;
+
+/** A whole number of columns or rows in [min, max]; anything else falls back to `fallback`. */
+export function gridCount(value, min, max, fallback) {
+  const n = Number(value);
+  if (value === null || value === '' || typeof value === 'boolean' || !Number.isFinite(n)) return fallback;
+  return clamp(Math.round(n), min, max);
+}
+
+/** Columns and rows to draw, clamped to the supported range (3 × 3 when missing). */
+export const gridDims = (cols, rows) => ({
+  cols: gridCount(cols, MORPH_MIN_COLS, MORPH_MAX_COLS, DEFAULT_MORPH_COLS),
+  rows: gridCount(rows, MORPH_MIN_ROWS, MORPH_MAX_ROWS, DEFAULT_MORPH_ROWS),
+});
 
 /**
  * The glyphs of the loop from free text: visible graphemes only (spaces dropped), at most
@@ -170,13 +187,15 @@ export function morphCellState(seconds, count, hold, melt, stages = MORPH_THEME.
 }
 
 /**
- * All nine cells at global time `time` (seconds), row-major from the top-left cell.
- * `still` (reduced motion) drops the rings and the tint and keeps every glyph whole.
+ * All `cols × rows` cells (3 × 3 when missing) at global time `time` (seconds), row-major
+ * from the top-left cell. `still` (reduced motion) drops the rings and the tint and keeps
+ * every glyph whole.
  */
-export function morphGridFrame(time, { count, hold, melt, colDelay, rowDelay, still = false }) {
+export function morphGridFrame(time, { cols, rows, count, hold, melt, colDelay, rowDelay, still = false }) {
+  const dims = gridDims(cols, rows);
   const cells = [];
-  for (let row = 0; row < MORPH_ROWS; row++) {
-    for (let col = 0; col < MORPH_COLS; col++) {
+  for (let row = 0; row < dims.rows; row++) {
+    for (let col = 0; col < dims.cols; col++) {
       const local = time + MORPH_START_OFFSET_S - cellDelay(col, row, colDelay, rowDelay);
       const state = morphCellState(local, count, hold, melt);
       cells.push(still
@@ -188,11 +207,12 @@ export function morphGridFrame(time, { count, hold, melt, colDelay, rowDelay, st
 }
 
 /**
- * The largest grid of MORPH_CELL_ASPECT cells (4:5 overall) that fits `rect` (any units),
- * with a `margin` share kept clear on each side, centred. Returns { x, y, width, height }.
+ * The largest `cols × rows` grid of MORPH_CELL_ASPECT (4:5) cells that fits `rect` (any
+ * units), with a `margin` share kept clear on each side, centred. Returns { x, y, width, height }.
  */
-export function morphGridRect(rect, margin = 0) {
-  const gridAspect = (MORPH_COLS * MORPH_CELL_ASPECT) / MORPH_ROWS;
+export function morphGridRect(rect, margin = 0, cols = DEFAULT_MORPH_COLS, rows = DEFAULT_MORPH_ROWS) {
+  const dims = gridDims(cols, rows);
+  const gridAspect = (dims.cols * MORPH_CELL_ASPECT) / dims.rows;
   const availW = Math.max(1, rect.width * (1 - 2 * margin));
   const availH = Math.max(1, rect.height * (1 - 2 * margin));
   const width = Math.min(availW, availH * gridAspect);

@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MORPH_MAX_CELLS,
   MORPH_START_OFFSET_S,
   MORPH_THEME,
   cellDelay,
   cubicBezier,
+  gridDims,
   meltEnvelope,
   morphCellState,
   morphCycle,
@@ -152,5 +154,49 @@ describe('stage colour (QA round 1 fixes)', () => {
   });
   it('tint stays within the flash limit', () => {
     expect(tintSwitchesPerSecond(4, H, M)).toBeLessThanOrEqual(3);
+  });
+});
+
+describe('grid size', () => {
+  it('defaults to 3 × 3 when cols/rows are missing', () => {
+    const cells = morphGridFrame(1, OPTS);
+    expect(cells).toHaveLength(9);
+    expect(cells.map((c) => [c.col, c.row])).toEqual([[0, 0], [1, 0], [2, 0], [0, 1], [1, 1], [2, 1], [0, 2], [1, 2], [2, 2]]);
+  });
+  it('returns cols × rows cells, row-major, capped at 6 × 6', () => {
+    const cells = morphGridFrame(1, { ...OPTS, cols: 5, rows: 4 });
+    expect(cells).toHaveLength(20);
+    cells.forEach((c, i) => expect([c.col, c.row]).toEqual([i % 5, Math.floor(i / 5)]));
+    expect(morphGridFrame(1, { ...OPTS, cols: 40, rows: 40 })).toHaveLength(MORPH_MAX_CELLS);
+    expect(morphGridFrame(1, { ...OPTS, cols: 1, rows: 1 })).toHaveLength(1);
+    expect(gridDims('x', -3)).toEqual({ cols: 3, rows: 1 });
+  });
+  it('lags cell (c, r) by c × colDelay + r × rowDelay on a 5 × 4 grid', () => {
+    const opts = { ...OPTS, cols: 5, rows: 4 };
+    [0.3, 1.7, 3.9, 5.2].forEach((t) => {
+      const cells = morphGridFrame(t, opts);
+      cells.forEach((c) => {
+        const ref = morphGridFrame(t - (c.col * OPTS.colDelay + c.row * OPTS.rowDelay), opts)[0];
+        expect(c.from).toBe(ref.from);
+        expect(c.mix).toBeCloseTo(ref.mix, 6);
+        expect(c.halo).toBeCloseTo(ref.halo, 6);
+      });
+    });
+  });
+  it('keeps the 3 × 3 default frame identical when cols/rows are given explicitly', () => {
+    [0.5, 1.25, 2.33, 3.75, 5.5].forEach((t) => {
+      expect(morphGridFrame(t, { ...OPTS, cols: 3, rows: 3 })).toEqual(morphGridFrame(t, OPTS));
+    });
+  });
+  it('morphGridRect keeps 4:5 cells and centres the grid', () => {
+    const rect = { x: 0, y: 0, width: 1000, height: 800 };
+    [[1, 1], [5, 2], [6, 6], [2, 5]].forEach(([cols, rows]) => {
+      const r = morphGridRect(rect, 0, cols, rows);
+      expect(r.width / r.height).toBeCloseTo((cols * 0.8) / rows, 6);
+      expect(r.width).toBeLessThanOrEqual(1000 + 1e-9);
+      expect(r.height).toBeLessThanOrEqual(800 + 1e-9);
+      expect(r.x + r.width / 2).toBeCloseTo(500, 6);
+      expect(r.y + r.height / 2).toBeCloseTo(400, 6);
+    });
   });
 });

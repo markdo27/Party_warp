@@ -27,7 +27,21 @@
  */
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { loadSvgLogo } from './svgLogo.js';
-import { DEFAULT_MORPH_GLYPHS, MORPH_THEME, morphCycle, morphGlyphList, morphGridFrame } from './morphGrid.js';
+import {
+  DEFAULT_MORPH_COLS,
+  DEFAULT_MORPH_GLYPHS,
+  DEFAULT_MORPH_ROWS,
+  MORPH_MAX_COLS,
+  MORPH_MAX_GLYPHS,
+  MORPH_MAX_ROWS,
+  MORPH_MIN_COLS,
+  MORPH_MIN_GLYPHS,
+  MORPH_MIN_ROWS,
+  MORPH_THEME,
+  morphCycle,
+  morphGlyphList,
+  morphGridFrame,
+} from './morphGrid.js';
 import { createMorphGridRenderer } from './morphGridRenderer.js';
 import {
   AlignCenter,
@@ -198,7 +212,7 @@ export const DESIGN_INFO = Object.freeze({
   bands: { name: 'Marquee', blurb: 'Scrolling colour bands repeat the text with a tagline.', line: true },
   wallpaper: { name: 'Wallpaper', blurb: 'A tilted sticker-bomb tiling with alternating colourways.', line: false },
   oval: { name: 'Oval', blurb: 'Type a name or initials inside a soft oval ring. The frame grows to fit your text.', line: false },
-  morphGrid: { name: 'Morph grid', blurb: 'A 3 × 3 grid of letters that melt into each other in a wave, with flat colour rings.', line: false },
+  morphGrid: { name: 'Morph grid', blurb: 'A grid of letters that melt into each other in a wave, with flat colour rings.', line: false },
 });
 export const DESIGNS = Object.keys(DESIGN_INFO);
 const MODE_INDEX = Object.freeze({ sticker: 0, bands: 1, wallpaper: 2, oval: 3, morphGrid: 0 });
@@ -269,6 +283,8 @@ export const DEFAULTS = Object.freeze({
   morphColDelay: 0.085,
   morphRowDelay: 0.46,
   morphHalo: 1,
+  morphCols: DEFAULT_MORPH_COLS,
+  morphRows: DEFAULT_MORPH_ROWS,
 });
 
 export const RANGES = Object.freeze({
@@ -305,6 +321,8 @@ export const RANGES = Object.freeze({
   morphColDelay: { min: 0, max: 0.5, step: 0.005 },
   morphRowDelay: { min: 0, max: 1.5, step: 0.01 },
   morphHalo: { min: 0, max: 2, step: 0.01 },
+  morphCols: { min: MORPH_MIN_COLS, max: MORPH_MAX_COLS, step: 1 },
+  morphRows: { min: MORPH_MIN_ROWS, max: MORPH_MAX_ROWS, step: 1 },
 });
 
 /* ── Validation & text helpers (pure) ─────────────────────────────────────── */
@@ -2895,10 +2913,27 @@ const prefersReducedMotion = () =>
 
 const currentDpr = () => clamp(window.devicePixelRatio || 1, 1, 2);
 
-/** The nine Morph grid cells at `time` seconds for these settings. */
+/** The Morph grid cells (morphCols × morphRows) at `time` seconds for these settings. */
 export function morphCells(p, time, still = false) {
   const count = morphGlyphList(p.morphGlyphs, graphemes).length;
-  return morphGridFrame(time, { count, hold: p.morphHold, melt: p.morphMelt, colDelay: p.morphColDelay, rowDelay: p.morphRowDelay, still });
+  return morphGridFrame(time, {
+    cols: p.morphCols,
+    rows: p.morphRows,
+    count,
+    hold: p.morphHold,
+    melt: p.morphMelt,
+    colDelay: p.morphColDelay,
+    rowDelay: p.morphRowDelay,
+    still,
+  });
+}
+
+/** Warning under the letters field, or null: too few letters, or more than the loop uses. */
+export function morphGlyphNotice(raw) {
+  const typed = graphemes(String(raw ?? '')).filter((g) => g.trim() !== '').length;
+  if (typed < MORPH_MIN_GLYPHS) return `Type at least ${MORPH_MIN_GLYPHS} letters. Showing the sample loop.`;
+  if (typed > MORPH_MAX_GLYPHS) return `Only the first ${MORPH_MAX_GLYPHS} letters are used.`;
+  return null;
 }
 
 /**
@@ -3031,6 +3066,7 @@ const STYLES = `
 .rsw-mono{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
 .rsw-range{-webkit-appearance:none;appearance:none;width:100%;height:24px;background:transparent;cursor:pointer;touch-action:pan-y}
 .rsw-range:focus{outline:none}
+@media (pointer:coarse){.rsw-range{height:44px}}
 .rsw-range::-webkit-slider-runnable-track{height:4px;border-radius:999px;background:linear-gradient(90deg,${ACCENT} var(--pct),rgba(255,255,255,.12) var(--pct))}
 .rsw-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:16px;height:16px;margin-top:-6px;border:0;border-radius:999px;background:#fff;box-shadow:0 0 0 3px rgba(255,200,248,.22),0 2px 6px rgba(0,0,0,.6);transition:transform .12s}
 .rsw-range:active::-webkit-slider-thumb{transform:scale(1.18)}
@@ -3829,7 +3865,15 @@ export default function RetroStickerWarp({
           const { shown } = clockRef.current;
           const t = live.playing ? Math.floor(shown * MORPH_PREVIEW_FPS) / MORPH_PREVIEW_FPS : shown;
           const still = prefersReducedMotion(); // static letters, no rings or fringe
-          morph.render({ cells: morphCells(live.params, t, still), rect: live.free, dpr: live.dpr, haloScale: live.params.morphHalo, still });
+          morph.render({
+            cells: morphCells(live.params, t, still),
+            rect: live.free,
+            cols: live.params.morphCols,
+            rows: live.params.morphRows,
+            dpr: live.dpr,
+            haloScale: live.params.morphHalo,
+            still,
+          });
         } catch (err) {
           if (!reported) console.error('[RetroStickerWarp] morph grid render failed', err);
           reported = true;
@@ -4180,7 +4224,7 @@ export default function RetroStickerWarp({
     if (!morph?.ready || !live) throw new Error('The Morph grid is still loading its letters.');
     const p = live.params;
     const [width, height] = kind === 'motion' && p.motionRatio !== 'fit' ? MOTION_CANVAS_PX[p.motionRatio] : MORPH_EXPORT_PX;
-    const pixelsAt = (time) => morph.readPixels({ cells: morphCells(p, time), width, height, haloScale: p.morphHalo });
+    const pixelsAt = (time) => morph.readPixels({ cells: morphCells(p, time), width, height, cols: p.morphCols, rows: p.morphRows, haloScale: p.morphHalo });
     const count = morphGlyphList(p.morphGlyphs, graphemes).length;
     return { live, width, height, pixelsAt, loopSeconds: morphCycle(count, p.morphHold, p.morphMelt) };
   }, []);
@@ -4335,6 +4379,8 @@ export default function RetroStickerWarp({
   const isMorph = design === 'morphGrid';
   const stageColor = design === 'bands' ? bandTheme.bands[0].bg : isMorph ? MORPH_THEME.bg : params.bg;
   const morphReading = morphGlyphList(params.morphGlyphs, graphemes).join(' → ');
+  const morphGridSize = `${params.morphCols} × ${params.morphRows} grid`;
+  const morphNotice = morphGlyphNotice(params.morphGlyphs);
   const reading = sequenceEnabled ? messageTexts.map((message) => displayLines(message, params.caps).join(' ')).join(' → ') || 'empty' : logo ? `${logo.name}${oneLine ? ` — ${tagline.replace(/\n/g, ' ')}` : ''}` : oneLine
     ? `${bandLine(lines) || 'empty'} — ${tagline.replace(/\n/g, ' ')}`
     : lines.join(' ').trim() || 'empty';
@@ -4374,6 +4420,7 @@ export default function RetroStickerWarp({
             className="absolute inset-0 block h-full w-full"
             role="img"
             aria-label={`Morph grid reading: ${morphReading}`}
+            aria-description={morphGridSize}
           />
         )}
         {canTypeOnStage && (
@@ -4627,9 +4674,14 @@ export default function RetroStickerWarp({
                 spellCheck={false}
                 autoComplete="off"
                 onChange={(e) => update('morphGlyphs', e.target.value)}
+                aria-describedby="rsw-morph-glyphs-help rsw-morph-glyphs-notice"
                 className="block w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[14px] font-semibold tracking-wide text-white focus:border-[#ffc8f8]/60 focus:outline-none"
               />
-              <p className="text-[11px] leading-relaxed text-white/55">Each letter melts into the next, then the loop starts over. 2 to 6 letters; spaces are skipped. Reading: {morphReading}</p>
+              <p id="rsw-morph-glyphs-notice" aria-live="polite" className="min-h-0 text-[11px] font-medium leading-relaxed text-[#ffc8f8] empty:hidden">{morphNotice ?? ''}</p>
+              <p id="rsw-morph-glyphs-help" className="text-[11px] leading-relaxed text-white/55">Each letter melts into the next, then the loop starts over. 2 to 6 letters; spaces are skipped. Reading: {morphReading}</p>
+              <Slider label="Columns" value={params.morphCols} range={RANGES.morphCols} format={(v) => String(v)} onChange={(v) => update('morphCols', v)} />
+              <Slider label="Rows" value={params.morphRows} range={RANGES.morphRows} format={(v) => String(v)} onChange={(v) => update('morphRows', v)} />
+              <p className="text-[11px] leading-relaxed text-white/55">{morphGridSize}, up to {MORPH_MAX_COLS} × {MORPH_MAX_ROWS}. Changing the grid keeps the loop running in time.</p>
               <Slider label="Hold each letter" value={params.morphHold} range={RANGES.morphHold} format={(v) => `${v.toFixed(2)}s`} onChange={(v) => update('morphHold', v)} />
               <Slider label="Melting time" value={params.morphMelt} range={RANGES.morphMelt} format={(v) => `${v.toFixed(2)}s`} onChange={(v) => update('morphMelt', v)} />
               <Slider label="Column lag" value={params.morphColDelay} range={RANGES.morphColDelay} format={(v) => `${Math.round(v * 1000)} ms`} onChange={(v) => update('morphColDelay', v)} />

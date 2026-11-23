@@ -67,6 +67,7 @@ import {
   rowColToCaret,
   sanitizeInput,
   morphCells,
+  morphGlyphNotice,
   sanitizeParams,
   sanitizeTagline,
   selectionRects,
@@ -1153,6 +1154,27 @@ describe('fileNameFor', () => {
 });
 
 describe('morph grid params', () => {
+  it('clamps columns and rows to 1..6 and falls back to 3 for junk', () => {
+    expect(sanitizeParams({}).morphCols).toBe(3);
+    expect(sanitizeParams({}).morphRows).toBe(3);
+    expect(sanitizeParams({ morphCols: 99, morphRows: 99 })).toMatchObject({ morphCols: 6, morphRows: 6 });
+    expect(sanitizeParams({ morphCols: -1, morphRows: 0 })).toMatchObject({ morphCols: 1, morphRows: 1 });
+    expect(sanitizeParams({ morphCols: 'abc', morphRows: NaN })).toMatchObject({ morphCols: 3, morphRows: 3 });
+    expect(sanitizeParams({ morphCols: 4.6, morphRows: '2' })).toMatchObject({ morphCols: 5, morphRows: 2 });
+  });
+  it('morphCells follows the chosen grid size', () => {
+    const p = sanitizeParams({ design: 'morphGrid', morphCols: 5, morphRows: 2 });
+    const cells = morphCells(p, 1.25);
+    expect(cells).toHaveLength(10);
+    expect(cells[9]).toMatchObject({ col: 4, row: 1 });
+  });
+  it('warns when fewer than 2 or more than 6 letters are typed', () => {
+    expect(morphGlyphNotice('R')).toBe('Type at least 2 letters. Showing the sample loop.');
+    expect(morphGlyphNotice('   ')).toBe('Type at least 2 letters. Showing the sample loop.');
+    expect(morphGlyphNotice('ABCDEFGH')).toBe('Only the first 6 letters are used.');
+    expect(morphGlyphNotice('Raum')).toBeNull();
+    expect(morphGlyphNotice('Ốườ')).toBeNull();
+  });
   it('defaults to the spec timing (6.6 s loop, 85 ms column and 460 ms row lag)', () => {
     const p = sanitizeParams({ design: 'morphGrid' });
     expect(p.design).toBe('morphGrid');

@@ -4,7 +4,7 @@
  * blends two fields per cell, draws the ink with thin scanlines and a beaded edge, and
  * lays flat colour rings (iso-distance bands) around it.
  */
-import { MORPH_CELLS, MORPH_COLS, MORPH_ROWS, MORPH_RINGS_PER_STAGE, MORPH_THEME, morphGridRect } from './morphGrid.js';
+import { MORPH_MAX_CELLS, MORPH_RINGS_PER_STAGE, MORPH_THEME, gridDims, morphGridRect } from './morphGrid.js';
 
 const GLYPH_W = 192; // field size of one cell, px (4:5 like the cell)
 const GLYPH_H = 240;
@@ -25,8 +25,9 @@ precision highp sampler2DArray;
 uniform sampler2DArray uGlyphs;
 uniform vec2 uRes;
 uniform vec4 uGrid;          // x, y (top-down), width, height in device px
-uniform vec4 uCellA[${MORPH_CELLS}]; // from, to, mix, halo
-uniform vec4 uCellB[${MORPH_CELLS}]; // tint, tint stage, 0, 0
+uniform vec2 uDims;          // columns, rows
+uniform vec4 uCellA[${MORPH_MAX_CELLS}]; // from, to, mix, halo
+uniform vec4 uCellB[${MORPH_MAX_CELLS}]; // tint, tint stage, 0, 0
 uniform vec3 uRings[${4 * MORPH_RINGS_PER_STAGE}];
 uniform vec4 uTints[4];      // rgb, has tint
 uniform vec3 uBg;
@@ -46,10 +47,10 @@ void main() {
   vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y) - uGrid.xy;
   vec2 uv = p / uGrid.zw;
   if (uv.x < 0.0 || uv.y < 0.0 || uv.x >= 1.0 || uv.y >= 1.0) { outColor = vec4(uBg, 1.0); return; }
-  vec2 g = uv * vec2(${MORPH_COLS}.0, ${MORPH_ROWS}.0);
-  vec2 cell = floor(g);
+  vec2 g = uv * uDims;
+  vec2 cell = min(floor(g), uDims - 1.0);
   vec2 local = g - cell;
-  int idx = int(cell.y) * ${MORPH_COLS} + int(cell.x);
+  int idx = clamp(int(cell.y) * int(uDims.x + 0.5) + int(cell.x), 0, ${MORPH_MAX_CELLS - 1});
   vec4 a = uCellA[idx];
   vec4 b = uCellB[idx];
   float d0 = texture(uGlyphs, vec3(local, a.x)).r;
@@ -163,7 +164,7 @@ export function createMorphGridRenderer(canvas, { sdf, theme = MORPH_THEME }) {
   const tex = gl.createTexture();
   const loc = (name) => gl.getUniformLocation(program, name);
   const U = Object.fromEntries(
-    ['uGlyphs', 'uRes', 'uGrid', 'uCellA', 'uCellB', 'uRings', 'uTints', 'uBg', 'uInk', 'uScan', 'uHaloScale', 'uFringe'].map((n) => [n, loc(n)]),
+    ['uGlyphs', 'uRes', 'uGrid', 'uDims', 'uCellA', 'uCellB', 'uRings', 'uTints', 'uBg', 'uInk', 'uScan', 'uHaloScale', 'uFringe'].map((n) => [n, loc(n)]),
   );
   let glyphCount = 0;
 
@@ -176,7 +177,14 @@ export function createMorphGridRenderer(canvas, { sdf, theme = MORPH_THEME }) {
   gl.uniform3fv(U.uInk, hexRgb(theme.ink));
   gl.uniform3fv(U.uScan, hexRgb(theme.scan));
 
-  function draw({ width, height, grid, cells, haloScale = 1, still = false }, fbo) {
+  /** Packs per-cell values into a MORPH_MAX_CELLS-long array; unused slots stay 0. */
+  const packCells = (cells, pick) => {
+    const out = new Float32Array(MORPH_MAX_CELLS * 4);
+    cells.slice(0, MORPH_MAX_CELLS).forEach((c, i) => out.set(pick(c), i * 4));
+    return out;
+  };
+
+  function draw({ width, height, grid, dims, cells, haloScale = 1, still = false }, fbo) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.viewport(0, 0, width, height);
     gl.useProgram(program);
@@ -185,9 +193,10 @@ export function createMorphGridRenderer(canvas, { sdf, theme = MORPH_THEME }) {
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
     gl.uniform2f(U.uRes, width, height);
     gl.uniform4f(U.uGrid, grid.x, grid.y, grid.width, grid.height);
+    gl.uniform2f(U.uDims, dims.cols, dims.rows);
     const last = Math.max(0, glyphCount - 1);
-    gl.uniform4fv(U.uCellA, new Float32Array(cells.flatMap((c) => [Math.min(c.from, last), Math.min(c.to, last), c.mix, c.halo])));
-    gl.uniform4fv(U.uCellB, new Float32Array(cells.flatMap((c) => [c.tint, c.tintStage % theme.stages.length, 0, 0])));
+    gl.uniform4fv(U.uCellA, packCells(cells, (c) => [Math.min(c.from, last), Math.min(c.to, last), c.mix, c.halo]));
+    gl.uniform4fv(U.uCellB, packCells(cells, (c) => [c.tint, c.tintStage % theme.stages.length, 0, 0]));
     gl.uniform1f(U.uHaloScale, still ? 0 : haloScale);
     gl.uniform1f(U.uFringe, still ? 0 : REST_FRINGE);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -211,7 +220,7 @@ export function createMorphGridRenderer(canvas, { sdf, theme = MORPH_THEME }) {
       glyphCount = fields.length;
     },
     /** Draws to the canvas. `rect` is the grid's area in CSS px; `dpr` scales it. */
-    render({ cells, rect, dpr = 1, haloScale, still = false }) {
+    render({ cells, rect, cols, rows, dpr = 1, haloScale, still = false }) {
       if (!glyphCount) return;
       const width = Math.max(1, Math.round(canvas.clientWidth * dpr));
       const height = Math.max(1, Math.round(canvas.clientHeight * dpr));
@@ -219,12 +228,13 @@ export function createMorphGridRenderer(canvas, { sdf, theme = MORPH_THEME }) {
         canvas.width = width;
         canvas.height = height;
       }
-      const fit = morphGridRect(rect);
+      const dims = gridDims(cols, rows);
+      const fit = morphGridRect(rect, 0, dims.cols, dims.rows);
       const grid = { x: fit.x * dpr, y: fit.y * dpr, width: fit.width * dpr, height: fit.height * dpr };
-      draw({ width, height, grid, cells, haloScale, still }, null);
+      draw({ width, height, grid, dims, cells, haloScale, still }, null);
     },
     /** Renders off-screen at `width` × `height` and returns bottom-up opaque RGBA bytes. */
-    readPixels({ cells, width, height, haloScale, still = false }) {
+    readPixels({ cells, width, height, cols, rows, haloScale, still = false }) {
       if (!glyphCount) throw new Error('The Morph grid is still loading its letters.');
       const target = gl.createTexture();
       const fbo = gl.createFramebuffer();
@@ -236,7 +246,9 @@ export function createMorphGridRenderer(canvas, { sdf, theme = MORPH_THEME }) {
         if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
           throw new Error('Export buffer is not supported at this size.');
         }
-        draw({ width, height, grid: morphGridRect({ x: 0, y: 0, width, height }), cells, haloScale, still }, fbo);
+        const dims = gridDims(cols, rows);
+        const grid = morphGridRect({ x: 0, y: 0, width, height }, 0, dims.cols, dims.rows);
+        draw({ width, height, grid, dims, cells, haloScale, still }, fbo);
         const pixels = new Uint8Array(width * height * 4);
         gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
         return pixels;
