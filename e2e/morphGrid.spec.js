@@ -100,7 +100,8 @@ test('morph grid letters can be changed and the reading follows', async ({ page 
   await openMorphGrid(page);
   await page.getByLabel('Letters in the loop', { exact: true }).fill('ABC');
   await expect(page.getByRole('img', { name: 'Morph grid reading: A → B → C', exact: true })).toBeAttached();
-  await expect(page.getByText(/Full loop: 4\.95s/)).toBeVisible();
+  await page.getByRole('tab', { name: 'Motion', exact: true }).click();
+  await expect(page.getByTestId('morph-loop-line')).toHaveText('Full loop: 4.95s at 1×.');
 });
 
 test('morph grid moves while playing and freezes on Pause', async ({ page }) => {

@@ -150,7 +150,7 @@ export function glyphField(glyph, family, sdf) {
  * @param {HTMLCanvasElement} canvas
  * @param {{ sdf: (alpha: Uint8Array, w: number, h: number) => Float32Array, theme?: typeof MORPH_THEME }} deps
  */
-export function createMorphGridRenderer(canvas, { sdf, theme = MORPH_THEME }) {
+export function createMorphGridRenderer(canvas, { sdf, theme: initialTheme = MORPH_THEME }) {
   const gl = canvas.getContext('webgl2', { antialias: false, premultipliedAlpha: false, preserveDrawingBuffer: true });
   if (!gl) throw new Error('WebGL2 is not available for the Morph grid.');
   const program = link(gl);
@@ -170,12 +170,19 @@ export function createMorphGridRenderer(canvas, { sdf, theme = MORPH_THEME }) {
 
   gl.useProgram(program);
   gl.uniform1i(U.uGlyphs, 0);
-  const rings = theme.stages.flatMap((s) => s.rings.flatMap(hexRgb));
-  gl.uniform3fv(U.uRings, new Float32Array(rings));
-  gl.uniform4fv(U.uTints, new Float32Array(theme.stages.flatMap((s) => (s.tint ? [...hexRgb(s.tint), 1] : [0, 0, 0, 0]))));
-  gl.uniform3fv(U.uBg, hexRgb(theme.bg));
-  gl.uniform3fv(U.uInk, hexRgb(theme.ink));
-  gl.uniform3fv(U.uScan, hexRgb(theme.scan));
+  let theme = initialTheme;
+  /** Uploads the colours of `next` (MORPH_THEME shape); later frames and exports use them. */
+  function setTheme(next) {
+    theme = next;
+    gl.useProgram(program);
+    const rings = theme.stages.flatMap((s) => s.rings.flatMap(hexRgb));
+    gl.uniform3fv(U.uRings, new Float32Array(rings));
+    gl.uniform4fv(U.uTints, new Float32Array(theme.stages.flatMap((s) => (s.tint ? [...hexRgb(s.tint), 1] : [0, 0, 0, 0]))));
+    gl.uniform3fv(U.uBg, hexRgb(theme.bg));
+    gl.uniform3fv(U.uInk, hexRgb(theme.ink));
+    gl.uniform3fv(U.uScan, hexRgb(theme.scan));
+  }
+  setTheme(initialTheme);
 
   /** Packs per-cell values into a MORPH_MAX_CELLS-long array; unused slots stay 0. */
   const packCells = (cells, pick) => {
@@ -203,6 +210,7 @@ export function createMorphGridRenderer(canvas, { sdf, theme = MORPH_THEME }) {
   }
 
   return {
+    setTheme,
     get ready() {
       return glyphCount > 0;
     },

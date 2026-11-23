@@ -263,14 +263,14 @@ export function morphCellState(seconds, count, hold, melt, stages = MORPH_THEME.
  * the lag of each cell. `still` (reduced motion) drops the rings and the tint and keeps
  * every glyph whole.
  */
-export function morphGridFrame(time, { cols, rows, count, hold, melt, colDelay, rowDelay, variant, still = false }) {
+export function morphGridFrame(time, { cols, rows, count, hold, melt, colDelay, rowDelay, variant, still = false, stages = MORPH_THEME.stages }) {
   const dims = gridDims(cols, rows);
   const lag = { ...dims, hold, melt, colDelay, rowDelay };
   const cells = [];
   for (let row = 0; row < dims.rows; row++) {
     for (let col = 0; col < dims.cols; col++) {
       const local = time + MORPH_START_OFFSET_S - variantDelay(variant, col, row, lag);
-      const state = morphCellState(local, count, hold, melt);
+      const state = morphCellState(local, count, hold, melt, stages);
       cells.push(still
         ? { ...state, to: state.from, mix: 0, halo: 0, tint: 0, melting: false, col, row }
         : { ...state, col, row });
@@ -297,14 +297,14 @@ export function morphGridRect(rect, margin = 0, cols = DEFAULT_MORPH_COLS, rows 
  * The most switches between a plain and a tinted background that one cell makes within any
  * one second of the loop. Used to check the flash limit (WCAG 2.3.1: at most 3 per second).
  */
-export function tintSwitchesPerSecond(count, hold, melt, sampleHz = 120) {
+export function tintSwitchesPerSecond(count, hold, melt, sampleHz = 120, stages = MORPH_THEME.stages) {
   const cycle = morphCycle(count, hold, melt);
   const steps = Math.ceil(cycle * sampleHz);
   const times = [];
   let last = null;
   for (let i = 0; i <= steps; i++) {
-    const s = morphCellState(i / sampleHz, count, hold, melt);
-    const tinted = Boolean(MORPH_THEME.stages[s.tintStage % MORPH_THEME.stages.length].tint) && s.tint > 0.5;
+    const s = morphCellState(i / sampleHz, count, hold, melt, stages);
+    const tinted = Boolean(stages[s.tintStage % stages.length].tint) && s.tint > 0.5;
     if (last !== null && tinted !== last) times.push(i / sampleHz);
     last = tinted;
   }

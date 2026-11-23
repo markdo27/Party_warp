@@ -43,12 +43,14 @@ for (const speed of [0.5, 1.4, 0]) {
     await waitForInk(canvas);
     await page.getByRole('button', { name: 'Pause', exact: true }).first().click();
     await page.getByLabel('Letters in the loop', { exact: true }).fill('AB');
-    await page.getByRole('slider', { name: 'Hold each letter', exact: true }).fill('0.3');
-    await page.getByRole('slider', { name: 'Melting time', exact: true }).fill('0.2');
     await page.getByRole('slider', { name: 'Columns', exact: true }).fill('4');
     await page.getByRole('slider', { name: 'Rows', exact: true }).fill('2');
     await expect(canvas).toHaveAttribute('aria-label', 'Morph grid reading: A → B');
-    await expect(page.getByText('Full loop: 1.00s.', { exact: false })).toBeVisible();
+    await page.getByRole('tab', { name: 'Motion', exact: true }).click();
+    await page.locator('details.rsw-advanced', { has: page.getByText('Timing', { exact: true }) }).locator('summary').click();
+    await page.getByRole('slider', { name: 'Hold each letter', exact: true }).fill('0.3');
+    await page.getByRole('slider', { name: 'Melting time', exact: true }).fill('0.2');
+    await expect(page.getByTestId('morph-loop-line')).toHaveText('Full loop: 1.00s at 1×.');
     await settle(page);
     await waitForInk(canvas);
     await page.getByRole('tab', { name: 'Motion', exact: true }).click();

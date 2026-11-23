@@ -46,6 +46,8 @@ import {
   MORPH_VARIANTS,
 } from './morphGrid.js';
 import { createMorphGridRenderer } from './morphGridRenderer.js';
+import { morphThemeFor } from './morphTheme.js';
+import { HEX_RE, contrastRatio, hexToRgb01 } from './color.js';
 import {
   AlignCenter,
   AlignLeft,
@@ -56,6 +58,7 @@ import {
   Copy,
   Circle,
   Dices,
+  Ellipsis,
   Download,
   Eraser,
   FileCode2,
@@ -289,6 +292,7 @@ export const DEFAULTS = Object.freeze({
   morphCols: DEFAULT_MORPH_COLS,
   morphRows: DEFAULT_MORPH_ROWS,
   morphVariant: DEFAULT_MORPH_VARIANT,
+  morphReference: false, // Morph grid: the original reference colours instead of the palette
 });
 
 export const RANGES = Object.freeze({
@@ -331,9 +335,8 @@ export const RANGES = Object.freeze({
 
 /* ── Validation & text helpers (pure) ─────────────────────────────────────── */
 
-const HEX_RE = /^#[0-9a-f]{6}$/i;
 const COLOR_KEYS = ['fill', 'sil', 'line', 'bg'];
-const BOOL_KEYS = ['caps', 'boil', 'sticker', 'transparent', 'messageLoop', 'exportMessageLoop'];
+const BOOL_KEYS = ['caps', 'boil', 'sticker', 'transparent', 'messageLoop', 'exportMessageLoop', 'morphReference'];
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\x00-\x08\x0B-\x1F\x7F-\x9F]/g;
 
@@ -454,11 +457,7 @@ export function fileNameFor(lines) {
 
 /* ── Colour helpers (pure) ─────────────────────────────────────────────────── */
 
-export function hexToRgb01(hex) {
-  if (!HEX_RE.test(hex ?? '')) return [0, 0, 0];
-  const n = parseInt(hex.slice(1), 16);
-  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
-}
+export { contrastRatio, hexToRgb01 };
 
 export function hslToHex(h, s, l) {
   const sat = clamp(s, 0, 100) / 100;
@@ -474,15 +473,6 @@ export function hslToHex(h, s, l) {
   return `#${channel(0)}${channel(8)}${channel(4)}`;
 }
 
-const relativeLuminance = (hex) => {
-  const [r, g, b] = hexToRgb01(hex).map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-};
-
-export function contrastRatio(a, b) {
-  const [hi, lo] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x);
-  return (hi + 0.05) / (lo + 0.05);
-}
 
 /** A saturated silhouette, a light complementary stroke and a legible fill. */
 export function randomPalette(rand = Math.random) {
@@ -2931,7 +2921,15 @@ export function morphCells(p, time, still = false) {
     rowDelay: p.morphRowDelay,
     variant: p.morphVariant,
     still,
+    stages: morphThemeFor(p).stages,
   });
+}
+
+/** The loop line under Motion: real seconds per loop at the chosen Speed. */
+export function morphLoopText(cycleSeconds, speed) {
+  if (!(speed > 0)) return 'Paused by Speed 0.';
+  const at = Math.abs(speed - 1) < 1e-9 ? `${cycleSeconds.toFixed(2)}s at 1×` : `${(cycleSeconds / speed).toFixed(2)}s (Speed ${Number(speed.toFixed(2))}×)`;
+  return `Full loop: ${at}.`;
 }
 
 /** Warning under the letters field, or null: too few letters, or more than the loop uses. */
@@ -3093,7 +3091,7 @@ const STYLES = `
 
 const focusRing = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#ffc8f8]/70';
 
-function Section({ icon: Icon, title, children, defaultOpen = true }) {
+function Section({ icon: Icon, title, titleId, description, children, defaultOpen = true }) {
   const [open, setOpen] = useState(defaultOpen);
   const bodyId = useId();
   return (
@@ -3106,10 +3104,11 @@ function Section({ icon: Icon, title, children, defaultOpen = true }) {
         className={`flex w-full items-center gap-2.5 px-4 py-3 text-left hover:bg-white/[0.02] ${focusRing}`}
       >
         <Icon size={14} className="text-[#ffc8f8]" aria-hidden />
-        <span className="flex-1 text-[13px] font-semibold text-white/85">{title}</span>
+        <span id={titleId} className="flex-1 text-[13px] font-semibold text-white/85">{title}</span>
         <ChevronDown size={14} className={`text-white/35 transition-transform ${open ? '' : '-rotate-90'}`} aria-hidden />
       </button>
       <div id={bodyId} hidden={!open} className="space-y-3.5 px-4 pb-4">
+        {description && <p className="-mt-1 text-[11px] leading-relaxed text-white/55">{description}</p>}
         {children}
       </div>
     </section>
@@ -3410,6 +3409,18 @@ export default function RetroStickerWarp({
   const morphCanvasRef = useRef(null);
   const morphRef = useRef(null);
   const [morphVersion, setMorphVersion] = useState(0);
+  const morphSeenRef = useRef(false);
+  const [layoutPicker, setLayoutPicker] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreWrapRef = useRef(null);
+  // The mobile More actions menu closes on a tap anywhere outside it.
+  useEffect(() => {
+    if (!moreOpen) return undefined;
+    const close = (e) => { if (!moreWrapRef.current?.contains(e.target)) setMoreOpen(false); };
+    document.addEventListener('pointerdown', close);
+    return () => document.removeEventListener('pointerdown', close);
+  }, [moreOpen]);
+  const moreButtonRef = useRef(null);
   const liveRef = useRef(null);
   const dirtyRef = useRef(true);
   const clockRef = useRef({ time: 0, shown: 0, scroll: 0, shownScroll: 0, seed: 0 });
@@ -3430,6 +3441,7 @@ export default function RetroStickerWarp({
   const sequenceActive = sequenceEnabled && messageTexts.length > 1;
   const canTypeOnStage = isSticker && !logo && !sequenceEnabled;
   const bandLike = design === 'bands'; // band themes + single-line export
+  const morphTheme = morphThemeFor(params);
   const panelOpen = panelPref ?? stage.width >= PANEL_AUTO_OPEN_WIDTH;
   const lines = useMemo(() => displayLines(text, params.caps), [text, params.caps]);
   const fieldLines = useMemo(() => (oneLine ? [bandLine(lines)] : lines), [oneLine, lines]);
@@ -3466,9 +3478,19 @@ export default function RetroStickerWarp({
     dirtyRef.current = true;
   }, [params.messageHold, params.messageMelt]);
   const applyPalette = useCallback(
-    (pal) => setParams((prev) => sanitizeParams({ ...prev, fill: pal.fill, sil: pal.sil, line: pal.line, bg: pal.bg })),
+    (pal) => setParams((prev) => sanitizeParams({ ...prev, fill: pal.fill, sil: pal.sil, line: pal.line, bg: pal.bg, morphReference: false })),
     [],
   );
+  /** A Custom colours edit: the Morph grid leaves the Reference look and follows the palette. */
+  const updateColor = useCallback(
+    (key, value) => setParams((prev) => sanitizeParams({ ...prev, [key]: value, morphReference: false })),
+    [],
+  );
+  const applyEnergy = useCallback((name) => {
+    const preset = MOTION_PRESETS.find((m) => m.name === name);
+    if (preset) setParams((prev) => sanitizeParams({ ...prev, ...preset.settings }));
+  }, []);
+  const applyMorphReference = useCallback(() => update('morphReference', true), [update]);
 
   useEffect(() => {
     if (!toast) return undefined;
@@ -3540,6 +3562,14 @@ export default function RetroStickerWarp({
       rendererRef.current = null;
     };
   }, []);
+
+  // The Morph grid follows the palette (or the Reference look); exports read the same GL state.
+  useEffect(() => {
+    const morph = morphRef.current;
+    if (!morph) return;
+    morph.setTheme(morphTheme);
+    dirtyRef.current = true;
+  }, [morphTheme, morphVersion]);
 
   // Morph grid renderer: its own WebGL2 canvas over the stage (incl. context loss). The canvas
   // only exists while the Morph grid design is picked, so other designs keep a single context.
@@ -4137,8 +4167,23 @@ export default function RetroStickerWarp({
       logoRequestRef.current += 1;
       setLogoLoading(false);
     }
-    setParams((prev) => (prev.design === design ? prev : sanitizeParams({ ...prev, ...DESIGN_LOOKS[design], design })));
+    const firstMorph = design === 'morphGrid' && !morphSeenRef.current;
+    if (design === 'morphGrid') morphSeenRef.current = true;
+    setParams((prev) => {
+      if (prev.design === design) return prev;
+      // First Morph grid visit with the untouched default colours: show the Reference look.
+      const untouched = COLOR_KEYS.every((k) => prev[k] === DEFAULTS[k]);
+      const reference = firstMorph && untouched ? { morphReference: true } : {};
+      return sanitizeParams({ ...prev, ...DESIGN_LOOKS[design], ...reference, design });
+    });
   }, []);
+
+  /** A layout picked in the panel keeps the picker open (focus stays on the radio). */
+  const pickLayout = useCallback((id) => {
+    setLayoutPicker(true);
+    setDesign(id);
+  }, [setDesign]);
+  useEffect(() => setLayoutPicker(false), [panelTab]);
 
   /* ── Panel ── */
 
@@ -4380,16 +4425,22 @@ export default function RetroStickerWarp({
   const activePalette = PALETTES.find((p) => COLOR_KEYS.every((k) => p[k] === params[k]))?.id;
   const motionLabel = !playing ? 'paused' : params.boil ? `boil · ${params.boilFps} fps` : 'smooth · 60 fps';
   const designName = DESIGN_INFO[design].name;
+  const CurrentDesignIcon = DESIGN_ICONS[design];
+  // Morph grid folds the layout picker to one row; it stays open while the picker is in use.
+  const layoutCollapsed = design === 'morphGrid' && !layoutPicker;
   const statusLabel = `${designName.toLowerCase()} · ${motionLabel}`;
   const centerX = free.x + free.width / 2;
   const ToastIcon = toast ? TOAST_ICONS[toast.tone] : null;
   const showToolbar = !(panelOpen && panelRect && panelRect.x <= stage.width * 0.35);
   const bandTheme = BAND_THEMES.find((t) => t.id === params.bandTheme) ?? BAND_THEMES[0];
   const isMorph = design === 'morphGrid';
-  const stageColor = design === 'bands' ? bandTheme.bands[0].bg : isMorph ? MORPH_THEME.bg : params.bg;
+  const stageColor = design === 'bands' ? bandTheme.bands[0].bg : isMorph ? morphTheme.bg : params.bg;
   const morphReading = morphGlyphList(params.morphGlyphs, graphemes).join(' → ');
   const morphGridSize = `${params.morphCols} × ${params.morphRows} grid`;
   const morphNotice = morphGlyphNotice(params.morphGlyphs);
+  const activeEnergy = MOTION_PRESETS.find(({ settings }) => Object.entries(settings).every(([key, value]) => params[key] === value))?.name ?? null;
+  const morphLoopSeconds = morphCycle(morphGlyphList(params.morphGlyphs, graphemes).length, params.morphHold, params.morphMelt);
+  const morphLoopLine = morphLoopText(morphLoopSeconds, params.speed);
   const morphVariantHint = MORPH_VARIANTS.find((v) => v.id === params.morphVariant)?.hint ?? MORPH_VARIANTS[0].hint;
   const reading = sequenceEnabled ? messageTexts.map((message) => displayLines(message, params.caps).join(' ')).join(' → ') || 'empty' : logo ? `${logo.name}${oneLine ? ` — ${tagline.replace(/\n/g, ' ')}` : ''}` : oneLine
     ? `${bandLine(lines) || 'empty'} — ${tagline.replace(/\n/g, ' ')}`
@@ -4507,7 +4558,7 @@ export default function RetroStickerWarp({
           <Sticker size={17} aria-hidden />
         </span>
         <div className="leading-tight">
-          <p className="text-[14px] font-semibold tracking-tight">Sticker Warp</p>
+          <p className="text-[14px] font-semibold tracking-tight">Party Warp</p>
           <p className="rsw-mono text-[10px] uppercase tracking-[0.16em] text-white/70">{statusLabel}</p>
         </div>
       </header>
@@ -4551,26 +4602,57 @@ export default function RetroStickerWarp({
             <ToolButton label={playing ? 'Pause' : 'Play'} onClick={() => setPlaying((p) => !p)}>
               {playing ? <Pause size={18} aria-hidden /> : <Play size={18} aria-hidden />}
             </ToolButton>
-            <ToolButton label={`Boil mode (${params.boilFps} fps)`} pressed={params.boil} onClick={() => update('boil', !params.boil)}>
-              <Film size={18} aria-hidden />
-            </ToolButton>
+            {!isMorph && (
+              <ToolButton label={`Boil mode (${params.boilFps} fps)`} pressed={params.boil} onClick={() => update('boil', !params.boil)} className="hidden sm:grid">
+                <Film size={18} aria-hidden />
+              </ToolButton>
+            )}
             <ToolDivider />
-            <ToolButton label="Sticker body" pressed={params.sticker} onClick={() => update('sticker', !params.sticker)}>
-              <Sticker size={18} aria-hidden />
-            </ToolButton>
-            <ToolButton label={`Design: ${designName} — switch to ${DESIGN_INFO[nextDesign].name}`} onClick={() => setDesign(nextDesign)}>
+            {!isMorph && (
+              <ToolButton label="Sticker body" pressed={params.sticker} onClick={() => update('sticker', !params.sticker)} className="hidden sm:grid">
+                <Sticker size={18} aria-hidden />
+              </ToolButton>
+            )}
+            <ToolButton label={`Design: ${designName}, switch to ${DESIGN_INFO[nextDesign].name}`} onClick={() => setDesign(nextDesign)}>
               <LayoutTemplate size={18} aria-hidden />
             </ToolButton>
             <ToolDivider />
-            <ToolButton label={logo ? "Change logo" : "Type on sticker"} onClick={() => focusTyping()} className="hidden sm:grid">
-              <TextCursorInput size={18} aria-hidden />
-            </ToolButton>
-            <ToolButton label={logo ? "Remove logo" : "Clear text"} onClick={logo ? removeLogo : clearText}>
-              <Eraser size={18} aria-hidden />
-            </ToolButton>
-            <ToolButton label="Shuffle colours" onClick={shufflePalette} className="hidden sm:grid">
+            {!isMorph && (
+              <>
+                <ToolButton label={logo ? 'Change logo' : 'Type on sticker'} onClick={() => focusTyping()} className="hidden sm:grid">
+                  <TextCursorInput size={18} aria-hidden />
+                </ToolButton>
+                <ToolButton label={logo ? 'Remove logo' : 'Clear text'} onClick={logo ? removeLogo : clearText}>
+                  <Eraser size={18} aria-hidden />
+                </ToolButton>
+              </>
+            )}
+            <ToolButton label="Shuffle colours" onClick={shufflePalette} className={isMorph ? 'grid' : 'hidden sm:grid'}>
               <Dices size={18} aria-hidden />
             </ToolButton>
+            {!isMorph && (
+              <div ref={moreWrapRef} className="relative sm:hidden"
+                onKeyDown={(e) => { if (moreOpen && e.key === 'Escape') { setMoreOpen(false); moreButtonRef.current?.focus(); } }}>
+                <ToolButton label="More actions" pressed={moreOpen} onClick={() => setMoreOpen((o) => !o)} buttonRef={moreButtonRef}>
+                  <Ellipsis size={18} aria-hidden />
+                </ToolButton>
+                {moreOpen && (
+                  <div role="group" aria-label="More actions" className="absolute bottom-full left-1/2 mb-2 w-48 -translate-x-1/2 space-y-0.5 rounded-xl border border-white/10 bg-[#0c0c0f]/95 p-1.5 shadow-[0_18px_50px_-18px_rgba(0,0,0,0.9)] backdrop-blur-xl">
+                    {[
+                      { label: `Boil mode (${params.boilFps} fps)`, icon: Film, pressed: params.boil, run: () => update('boil', !params.boil) },
+                      { label: 'Sticker body', icon: Sticker, pressed: params.sticker, run: () => update('sticker', !params.sticker) },
+                      { label: logo ? 'Change logo' : 'Type on sticker', icon: TextCursorInput, run: () => { setMoreOpen(false); focusTyping(); } },
+                      { label: 'Shuffle colours', icon: Dices, run: shufflePalette },
+                    ].map(({ label, icon: Icon, pressed, run }) => (
+                      <button key={label} type="button" aria-pressed={pressed} onClick={run}
+                        className={`flex min-h-[44px] w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] ${focusRing} ${pressed ? 'bg-[#ffc8f8] text-[#140a12]' : 'text-white/80 hover:bg-white/10'}`}>
+                        <Icon size={16} aria-hidden /> {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             <ToolDivider />
             <button
               type="button"
@@ -4642,11 +4724,19 @@ export default function RetroStickerWarp({
 
           <div ref={panelScrollRef} className="rsw-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain">
             <PanelPage name="Content" active={panelTab} panelId={panelId}>
-            <Section icon={LayoutTemplate} title="Choose a layout">
+            <Section icon={LayoutTemplate} title="Layout" titleId={`${panelId}-layout-label`} description="What the artwork is.">
+              {layoutCollapsed ? (
+                <div className="flex min-h-[48px] items-center gap-2.5 rounded-xl border border-[#ffc8f8]/40 bg-[#ffc8f8]/[0.06] px-3 py-1.5">
+                  <CurrentDesignIcon size={15} aria-hidden className="shrink-0 text-[#ffc8f8]" />
+                  <span className="flex-1 text-[13px] font-medium text-white">{designName}</span>
+                  <button type="button" aria-expanded="false" aria-label={`Change layout (now ${designName})`} onClick={() => setLayoutPicker(true)}
+                    className={`min-h-[44px] rounded-lg px-3 text-[12px] font-medium text-[#ffc8f8] hover:bg-white/[0.06] ${focusRing}`}>Change</button>
+                </div>
+              ) : (
               <div
                 role="radiogroup"
-                aria-label="Design"
-                onKeyDown={(e) => onRadioGroupKeyDown(e, DESIGNS, design, setDesign)}
+                aria-labelledby={`${panelId}-layout-label`}
+                onKeyDown={(e) => onRadioGroupKeyDown(e, DESIGNS, design, pickLayout)}
                 className="grid grid-cols-4 gap-1.5"
               >
                 {DESIGNS.map((id) => {
@@ -4660,8 +4750,8 @@ export default function RetroStickerWarp({
                       aria-checked={active}
                       tabIndex={active ? 0 : -1}
                       data-value={id}
-                      onClick={() => setDesign(id)}
-                      className={`flex flex-col items-center gap-2 rounded-xl border px-1 py-3 text-left text-[12px] font-medium transition-colors ${focusRing} ${
+                      onClick={() => pickLayout(id)}
+                      className={`flex min-h-[44px] flex-col items-center gap-2 rounded-xl border px-1 py-3 text-left text-[12px] font-medium transition-colors ${focusRing} ${
                         active ? 'border-[#ffc8f8]/70 bg-[#ffc8f8]/10 text-white' : 'border-white/10 bg-white/[0.03] text-white/75 hover:bg-white/[0.07]'
                       }`}
                     >
@@ -4671,10 +4761,11 @@ export default function RetroStickerWarp({
                   );
                 })}
               </div>
+              )}
               <p className="text-[11px] leading-relaxed text-white/60">{logo ? 'Your logo uses this layout. Adjust its colours and motion in the next tabs.' : DESIGN_INFO[design].blurb}</p>
             </Section>
 
-            {isMorph && <Section icon={Grid3x3} title="Morph grid">
+            {isMorph && <Section icon={Grid3x3} title="Letters & grid">
               <label htmlFor="rsw-morph-glyphs" className="block text-[12px] text-white/70">Letters in the loop</label>
               <input
                 id="rsw-morph-glyphs"
@@ -4689,35 +4780,9 @@ export default function RetroStickerWarp({
               />
               <p id="rsw-morph-glyphs-notice" aria-live="polite" className="min-h-0 text-[11px] font-medium leading-relaxed text-[#ffc8f8] empty:hidden">{morphNotice ?? ''}</p>
               <p id="rsw-morph-glyphs-help" className="text-[11px] leading-relaxed text-white/55">Each letter melts into the next, then the loop starts over. 2 to 6 letters; spaces are skipped. Reading: {morphReading}</p>
-              <div role="group" aria-labelledby="rsw-morph-variant-label" aria-describedby="rsw-morph-variant-hint" className="space-y-2">
-                <p id="rsw-morph-variant-label" className="text-[12px] text-white/70">Variation</p>
-                <div className="grid grid-cols-3 gap-2">
-                  {MORPH_VARIANTS.map(({ id, name }) => {
-                    const active = params.morphVariant === id;
-                    return (
-                      <button key={id} type="button" aria-pressed={active} data-variant={id}
-                        onClick={() => update('morphVariant', id)}
-                        className={`min-h-[44px] rounded-xl border px-2 py-2 text-[12px] font-medium leading-tight transition-colors ${focusRing} ${active ? 'border-[#ffc8f8]/70 bg-[#ffc8f8]/10 text-white' : 'border-white/10 text-white/70 hover:bg-white/[0.06]'}`}>
-                        {name}
-                      </button>
-                    );
-                  })}
-                </div>
-                <p id="rsw-morph-variant-hint" aria-live="polite" className="text-[11px] leading-relaxed text-white/55">{morphVariantHint}</p>
-              </div>
               <Slider label="Columns" value={params.morphCols} range={RANGES.morphCols} format={(v) => String(v)} onChange={(v) => update('morphCols', v)} />
               <Slider label="Rows" value={params.morphRows} range={RANGES.morphRows} format={(v) => String(v)} onChange={(v) => update('morphRows', v)} />
               <p className="text-[11px] leading-relaxed text-white/55">{morphGridSize}, up to {MORPH_MAX_COLS} × {MORPH_MAX_ROWS}. Changing the grid keeps the loop running in time.</p>
-              <Slider label="Hold each letter" value={params.morphHold} range={RANGES.morphHold} format={(v) => `${v.toFixed(2)}s`} onChange={(v) => update('morphHold', v)} />
-              <Slider label="Melting time" value={params.morphMelt} range={RANGES.morphMelt} format={(v) => `${v.toFixed(2)}s`} onChange={(v) => update('morphMelt', v)} />
-              {params.morphVariant === DEFAULT_MORPH_VARIANT && (
-                <>
-                  <Slider label="Column lag" value={params.morphColDelay} range={RANGES.morphColDelay} format={(v) => `${Math.round(v * 1000)} ms`} onChange={(v) => update('morphColDelay', v)} />
-                  <Slider label="Row lag" value={params.morphRowDelay} range={RANGES.morphRowDelay} format={(v) => `${Math.round(v * 1000)} ms`} onChange={(v) => update('morphRowDelay', v)} />
-                </>
-              )}
-              <Slider label="Ring size" value={params.morphHalo} range={RANGES.morphHalo} format={(v) => `${Math.round(v * 100)}%`} onChange={(v) => update('morphHalo', v)} />
-              <p className="text-[11px] leading-relaxed text-white/55">Full loop: {morphCycle(morphGlyphList(params.morphGlyphs, graphemes).length, params.morphHold, params.morphMelt).toFixed(2)}s. Reduced motion shows the letters still, without rings.</p>
             </Section>}
 
             {design !== 'oval' && !isMorph && <Section icon={FileUp} title="Use your SVG logo">
@@ -4891,14 +4956,31 @@ export default function RetroStickerWarp({
                 <>
 
               <div className="flex flex-wrap gap-1.5">
+                {isMorph && (
+                  <button
+                    type="button"
+                    onClick={applyMorphReference}
+                    aria-pressed={params.morphReference}
+                    className={`inline-flex min-h-[32px] items-center gap-1.5 rounded-full border py-1 pl-1 pr-2.5 text-[11px] transition-colors ${focusRing} ${
+                      params.morphReference ? 'border-[#ffc8f8]/70 bg-[#ffc8f8]/10 text-white' : 'border-white/10 text-white/65 hover:bg-white/[0.06]'
+                    }`}
+                  >
+                    <span className="grid h-5 w-5 place-items-center rounded-full" style={{ background: MORPH_THEME.stages[3].tint }}>
+                      <span className="grid h-3.5 w-3.5 place-items-center rounded-full" style={{ background: MORPH_THEME.stages[0].rings[0] }}>
+                        <span className="h-1.5 w-1.5 rounded-full" style={{ background: MORPH_THEME.ink }} />
+                      </span>
+                    </span>
+                    Reference
+                  </button>
+                )}
                 {PALETTES.map((pal) => (
                   <button
                     key={pal.id}
                     type="button"
                     onClick={() => applyPalette(pal)}
-                    aria-pressed={activePalette === pal.id}
+                    aria-pressed={!(isMorph && params.morphReference) && activePalette === pal.id}
                     className={`inline-flex items-center gap-1.5 rounded-full border py-1 pl-1 pr-2.5 text-[11px] transition-colors ${focusRing} ${
-                      activePalette === pal.id ? 'border-[#ffc8f8]/70 bg-[#ffc8f8]/10 text-white' : 'border-white/10 text-white/65 hover:bg-white/[0.06]'
+                      !(isMorph && params.morphReference) && activePalette === pal.id ? 'border-[#ffc8f8]/70 bg-[#ffc8f8]/10 text-white' : 'border-white/10 text-white/65 hover:bg-white/[0.06]'
                     }`}
                   >
                     <span className="grid h-5 w-5 place-items-center rounded-full" style={{ background: pal.line }}>
@@ -4917,13 +4999,15 @@ export default function RetroStickerWarp({
                   <Dices size={13} aria-hidden /> Shuffle
                 </button>
               </div>
+              {isMorph && params.morphReference && <p className="text-[11px] leading-relaxed text-white/55">Reference keeps the original Morph grid colours. Pick a palette, Shuffle or a custom colour to use your own.</p>}
               <Advanced title="Custom colours">
               <div className="grid grid-cols-2 gap-2">
-                <ColorField label={logo ? "Logo" : "Text"} value={params.fill} onChange={(v) => update('fill', v)} />
-                <ColorField label="Sticker" value={params.sil} onChange={(v) => update('sil', v)} />
-                <ColorField label="Stroke" value={params.line} onChange={(v) => update('line', v)} />
-                <ColorField label="Background" value={params.bg} onChange={(v) => update('bg', v)} />
+                <ColorField label={isMorph ? 'Letters' : logo ? 'Logo' : 'Text'} value={params.fill} onChange={(v) => updateColor('fill', v)} />
+                <ColorField label={isMorph ? 'Ring 1' : 'Sticker'} value={params.sil} onChange={(v) => updateColor('sil', v)} />
+                <ColorField label={isMorph ? 'Ring 2' : 'Stroke'} value={params.line} onChange={(v) => updateColor('line', v)} />
+                <ColorField label="Background" value={params.bg} onChange={(v) => updateColor('bg', v)} />
               </div>
+              {isMorph && <p className="text-[11px] leading-relaxed text-white/55">Letters switch to the higher-contrast colour if needed.</p>}
               </Advanced>
                 </>
               )}
@@ -4938,7 +5022,12 @@ export default function RetroStickerWarp({
               <p className="text-[11px] leading-relaxed text-white/55">The ring shares your text colour. Change the outer stroke below.</p>
             </Section>}
 
-            <Section icon={Sticker} title="Goo & outline">
+            {isMorph && <Section icon={Circle} title="Rings">
+              <Slider label="Ring size" value={params.morphHalo} range={RANGES.morphHalo} format={(v) => `${Math.round(v * 100)}%`} onChange={(v) => update('morphHalo', v)} />
+              <p className="text-[11px] leading-relaxed text-white/55">How far the colour rings spread while letters melt. Reduced motion shows the letters still, without rings.</p>
+            </Section>}
+
+            {!isMorph && <Section icon={Sticker} title="Goo & outline">
               <div className="space-y-1">
                 <Slider label="Goo" value={params.goo} range={RANGES.goo} format={fmt.pct} onChange={(v) => update('goo', v)} />
                 <p className="text-[11px] leading-relaxed text-white/55">{logo ? 'Round the edges and soften the logo’s outline.' : 'Melt neighbouring letters into soft bridges. Word spaces stay clear.'}</p>
@@ -4963,9 +5052,9 @@ export default function RetroStickerWarp({
               />
 
               </Advanced>
-            </Section>
+            </Section>}
 
-            <Section icon={Blend} title="Print texture" defaultOpen={false}>
+            {!isMorph && <Section icon={Blend} title="Print texture" defaultOpen={false}>
               <Slider label="Grain" value={params.grain} range={RANGES.grain} format={fmt.pct} onChange={(v) => update('grain', v)} />
               <Slider label="Halftone" value={params.halftone} range={RANGES.halftone} format={fmt.pct} onChange={(v) => update('halftone', v)} />
               <Slider
@@ -4994,22 +5083,59 @@ export default function RetroStickerWarp({
                 onChange={(v) => update('ditherPixel', v)}
               />
               <p className="text-[11px] leading-relaxed text-white/60">Textures render into PNG and video exports; SVG stays clean vectors.</p>
-            </Section>
+            </Section>}
             </PanelPage>
             <PanelPage name="Motion" active={panelTab} panelId={panelId}>
-            <Section icon={Waves} title="Bring it to life">
-              <p className="text-[12px] leading-relaxed text-white/60">Start with a preset, then adjust the speed and wobble.</p>
-              <div aria-label="Motion presets" className="grid grid-cols-3 gap-2">
-                {MOTION_PRESETS.map(({ name, settings }) => {
-                  const active = Object.entries(settings).every(([key, value]) => params[key] === value);
+            {isMorph ? (<>
+            <Section icon={Waves} title="Wave pattern" titleId={`${panelId}-wave-label`} description="Which cells melt first.">
+              <div role="radiogroup" aria-labelledby={`${panelId}-wave-label`} aria-describedby="rsw-morph-variant-hint"
+                onKeyDown={(e) => onRadioGroupKeyDown(e, MORPH_VARIANTS.map((v) => v.id), params.morphVariant, (id) => update('morphVariant', id))}
+                className="grid grid-cols-3 gap-2">
+                {MORPH_VARIANTS.map(({ id, name }) => {
+                  const active = params.morphVariant === id;
                   return (
-                    <button key={name} type="button" aria-pressed={active}
-                      onClick={() => setParams((prev) => sanitizeParams({ ...prev, ...settings }))}
-                      className={`rounded-xl border px-2 py-3 text-[12px] font-medium transition-colors ${focusRing} ${active ? 'border-[#ffc8f8]/70 bg-[#ffc8f8]/10 text-white' : 'border-white/10 text-white/70 hover:bg-white/[0.06]'}`}>
+                    <button key={id} type="button" role="radio" aria-checked={active} tabIndex={active ? 0 : -1} data-value={id} data-variant={id}
+                      onClick={() => update('morphVariant', id)}
+                      className={`min-h-[44px] rounded-xl border px-2 py-2 text-[12px] font-medium leading-tight transition-colors ${focusRing} ${active ? 'border-[#ffc8f8]/70 bg-[#ffc8f8]/10 text-white' : 'border-white/10 text-white/70 hover:bg-white/[0.06]'}`}>
                       {name}
                     </button>
                   );
                 })}
+              </div>
+              <p id="rsw-morph-variant-hint" aria-live="polite" className="text-[11px] leading-relaxed text-white/55">{morphVariantHint}</p>
+              {!playing && <p className="rounded-lg bg-[#ffc8f8]/10 px-3 py-2 text-[12px] text-[#ffc8f8]">Preview paused. Press Play below to see your changes.</p>}
+              <Slider label="Speed" value={params.speed} range={RANGES.speed} format={fmt.times} onChange={(v) => update('speed', v)} />
+              <Advanced title="Timing">
+                <Slider label="Hold each letter" value={params.morphHold} range={RANGES.morphHold} format={(v) => `${v.toFixed(2)}s`} onChange={(v) => update('morphHold', v)} />
+                <Slider label="Melting time" value={params.morphMelt} range={RANGES.morphMelt} format={(v) => `${v.toFixed(2)}s`} onChange={(v) => update('morphMelt', v)} />
+                {params.morphVariant === DEFAULT_MORPH_VARIANT && (
+                  <>
+                    <Slider label="Column lag" value={params.morphColDelay} range={RANGES.morphColDelay} format={(v) => `${Math.round(v * 1000)} ms`} onChange={(v) => update('morphColDelay', v)} />
+                    <Slider label="Row lag" value={params.morphRowDelay} range={RANGES.morphRowDelay} format={(v) => `${Math.round(v * 1000)} ms`} onChange={(v) => update('morphRowDelay', v)} />
+                  </>
+                )}
+              </Advanced>
+              <p className="text-[11px] leading-relaxed text-white/55" data-testid="morph-loop-line">{morphLoopLine}</p>
+            </Section>
+            </>) : (
+            <Section icon={Waves} title="Energy" titleId={`${panelId}-energy-label`} description="One click sets speed and wobble.">
+              <div className="flex items-center gap-2">
+                <div role="radiogroup" aria-labelledby={`${panelId}-energy-label`}
+                  onKeyDown={(e) => onRadioGroupKeyDown(e, MOTION_PRESETS.map((m) => m.name), activeEnergy ?? MOTION_PRESETS[1].name, applyEnergy)}
+                  className="flex flex-1 gap-1 rounded-xl border border-white/10 bg-black/30 p-1">
+                  {MOTION_PRESETS.map(({ name }) => {
+                    const active = activeEnergy === name;
+                    const focusable = activeEnergy ? active : name === MOTION_PRESETS[1].name;
+                    return (
+                      <button key={name} type="button" role="radio" aria-checked={active} tabIndex={focusable ? 0 : -1} data-value={name}
+                        onClick={() => applyEnergy(name)}
+                        className={`flex min-h-[44px] flex-1 items-center justify-center rounded-lg text-[12px] font-medium transition-colors ${focusRing} ${active ? 'bg-[#ffc8f8] text-[#140a12]' : 'text-white/60 hover:bg-white/[0.07] hover:text-white'}`}>
+                        {name}
+                      </button>
+                    );
+                  })}
+                </div>
+                {!activeEnergy && <span className="rsw-mono shrink-0 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] uppercase tracking-[0.12em] text-white/60">Custom</span>}
               </div>
               {!playing && <p className="rounded-lg bg-[#ffc8f8]/10 px-3 py-2 text-[12px] text-[#ffc8f8]">Preview paused. Press Play below to see your changes.</p>}
               <Slider label="Speed" value={params.speed} range={RANGES.speed} format={fmt.times} onChange={(v) => update('speed', v)} />
@@ -5044,6 +5170,7 @@ export default function RetroStickerWarp({
               )}
               </Advanced>
             </Section>
+            )}
             </PanelPage>
             <PanelPage name="Export" active={panelTab} panelId={panelId}>
             <Section icon={Download} title="Save your creation">
@@ -5092,7 +5219,7 @@ export default function RetroStickerWarp({
                   <p className="text-[11px] leading-relaxed text-white/55">One band, starting on a sticker, so it tiles side by side.</p>
                 </>
               )}
-              <Toggle label="Transparent background" checked={params.transparent} onChange={(v) => update('transparent', v)} />
+              {!isMorph && <Toggle label="Transparent background" checked={params.transparent} onChange={(v) => update('transparent', v)} />}
 
               <p className="pt-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/50">Save an image</p>
               <div className="grid grid-cols-3 gap-1.5">

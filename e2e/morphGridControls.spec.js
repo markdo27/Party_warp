@@ -88,9 +88,19 @@ async function setGrid(page, cols, rows) {
   await nextFrames(page);
 }
 
+/** Opens Motion > Timing, where Hold, Melting and the lag sliders live. */
+async function openTiming(page) {
+  await page.getByRole('tab', { name: 'Motion', exact: true }).click();
+  const timing = page.locator('details.rsw-advanced', { has: page.getByText('Timing', { exact: true }) });
+  if (!(await timing.evaluate((d) => d.open))) await timing.locator('summary').click();
+}
+
+/** Lags live in Motion > Timing; the grid sliders are back in Content. */
 async function zeroLags(page) {
+  await openTiming(page);
   await slider(page, 'Column lag').fill('0');
   await slider(page, 'Row lag').fill('0');
+  await page.getByRole('tab', { name: 'Content', exact: true }).click();
 }
 
 async function downloadPng(page) {

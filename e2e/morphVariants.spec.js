@@ -14,8 +14,8 @@ const LOOP_S = 6.6; // default Raum loop: 4 × (0.95 + 0.7)
 let consoleErrors = [];
 
 const morphCanvas = (page) => page.getByRole('img', { name: /^Morph grid reading:/ });
-const group = (page) => page.getByRole('group', { name: 'Variation', exact: true });
-const variantButton = (page, name) => group(page).getByRole('button', { name, exact: true });
+const group = (page) => page.getByRole('radiogroup', { name: 'Wave pattern', exact: true });
+const variantButton = (page, name) => group(page).getByRole('radio', { name, exact: true });
 const nextFrames = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(r)))));
 const pause = (page) => page.getByRole('button', { name: 'Pause', exact: true }).first().click();
 const pngSize = (bytes) => [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];
@@ -30,6 +30,18 @@ function morphHash(page) {
     const url = canvas.toDataURL('image/png');
     return `${url.length}:${url.slice(-400)}`;
   });
+}
+
+/** The hash once two frames in a row agree, so a frame still in flight under GPU load is never compared. */
+async function settledHash(page) {
+  let prev = await morphHash(page);
+  for (let i = 0; i < 10; i++) {
+    await nextFrames(page);
+    const next = await morphHash(page);
+    if (next === prev) return next;
+    prev = next;
+  }
+  return prev;
 }
 
 /** True once the canvas holds dark glyph ink (the letters are drawn). */
@@ -53,6 +65,19 @@ async function openMorphGrid(page, tap = false) {
   await expect.poll(() => hasInk(page), { timeout: 20_000 }).toBe(true);
 }
 
+/** The wave pattern picker sits in the Motion tab. */
+async function openMotion(page, tap = false) {
+  const tab = page.getByRole('tab', { name: 'Motion', exact: true });
+  await (tap ? tab.tap() : tab.click());
+}
+
+/** Opens Motion > Timing, where Hold, Melting and the lag sliders live. */
+async function openTiming(page) {
+  await page.getByRole('tab', { name: 'Motion', exact: true }).click();
+  const timing = page.locator('details.rsw-advanced', { has: page.getByText('Timing', { exact: true }) });
+  if (!(await timing.evaluate((d) => d.open))) await timing.locator('summary').click();
+}
+
 async function setGrid(page, cols, rows) {
   await page.getByRole('slider', { name: 'Columns', exact: true }).fill(String(cols));
   await page.getByRole('slider', { name: 'Rows', exact: true }).fill(String(rows));
@@ -72,29 +97,32 @@ test.afterEach(() => {
   expect(consoleErrors).toEqual([]);
 });
 
-test('selector: six buttons, one pressed, lag sliders only on Classic, keyboard works', async ({ page }) => {
+test('selector: six radios, one checked, lag sliders only on Classic, keyboard works', async ({ page }) => {
   await openMorphGrid(page);
+  await openTiming(page);
   for (const [, name] of VARIANTS) await expect(variantButton(page, name)).toBeVisible();
-  await expect(variantButton(page, 'Classic')).toHaveAttribute('aria-pressed', 'true');
+  await expect(variantButton(page, 'Classic')).toHaveAttribute('aria-checked', 'true');
   await expect(page.getByRole('slider', { name: 'Column lag', exact: true })).toBeVisible();
   await variantButton(page, 'Swirl').click();
-  await expect(variantButton(page, 'Swirl')).toHaveAttribute('aria-pressed', 'true');
-  await expect(variantButton(page, 'Classic')).toHaveAttribute('aria-pressed', 'false');
+  await expect(variantButton(page, 'Swirl')).toHaveAttribute('aria-checked', 'true');
+  await expect(variantButton(page, 'Classic')).toHaveAttribute('aria-checked', 'false');
   await expect(page.getByRole('slider', { name: 'Column lag', exact: true })).toHaveCount(0);
   await expect(page.getByRole('slider', { name: 'Row lag', exact: true })).toHaveCount(0);
   await expect(page.locator('#rsw-morph-variant-hint')).toContainText('clockwise');
-  await variantButton(page, 'Checker').focus();
-  await page.keyboard.press('Enter');
-  await expect(variantButton(page, 'Checker')).toHaveAttribute('aria-pressed', 'true');
+  await variantButton(page, 'Swirl').focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(variantButton(page, 'Checker')).toBeFocused();
+  await expect(variantButton(page, 'Checker')).toHaveAttribute('aria-checked', 'true');
   await variantButton(page, 'Classic').focus();
   await page.keyboard.press('Space');
-  await expect(variantButton(page, 'Classic')).toHaveAttribute('aria-pressed', 'true');
+  await expect(variantButton(page, 'Classic')).toHaveAttribute('aria-checked', 'true');
   await expect(page.getByRole('slider', { name: 'Column lag', exact: true })).toBeVisible();
 });
 
 test('paused at 6 × 6: every variation draws a different frame and stays still', async ({ page }) => {
   await openMorphGrid(page);
   await setGrid(page, 6, 6);
+  await openMotion(page);
   await pause(page);
   await seek(page, 1.25);
   const hashes = new Map();
@@ -112,14 +140,15 @@ test('paused at 6 × 6: every variation draws a different frame and stays still'
 test('every variation loops at 6 × 6: t and t + loop give the same frame', async ({ page }) => {
   await openMorphGrid(page);
   await setGrid(page, 6, 6);
+  await openMotion(page);
   await pause(page);
   for (const [, name] of VARIANTS.slice(1)) {
     await variantButton(page, name).click();
     for (const t of [0.9, 3.4]) {
       await seek(page, t);
-      const a = await morphHash(page);
+      const a = await settledHash(page);
       await seek(page, t + LOOP_S);
-      expect(await morphHash(page), `${name} at ${t}s`).toBe(a);
+      expect(await settledHash(page), `${name} at ${t}s`).toBe(a);
     }
   }
 });
@@ -128,6 +157,7 @@ test('switching 30 times keeps the letters, the grid and the clock running', asy
   await openMorphGrid(page);
   await page.getByLabel('Letters in the loop', { exact: true }).fill('Ốườab');
   await setGrid(page, 4, 5);
+  await openMotion(page);
   for (let i = 0; i < 30; i++) await variantButton(page, VARIANTS[i % VARIANTS.length][1]).click();
   await expect(page.getByRole('img', { name: 'Morph grid reading: Ố → ư → ờ → a → b', exact: true })).toBeAttached();
   await expect(morphCanvas(page)).toHaveAttribute('aria-description', '4 × 5 grid');
@@ -139,6 +169,7 @@ test('switching 30 times keeps the letters, the grid and the clock running', asy
 
 test('PNG export: 1080 × 1350 with the variation id in the file name', async ({ page }) => {
   await openMorphGrid(page);
+  await openMotion(page);
   await variantButton(page, 'Diagonal wave').click();
   await pause(page);
   await seek(page, 1);
@@ -158,6 +189,7 @@ test.describe('reduced motion', () => {
   test('every variation stays a still frame', async ({ page }) => {
     await openMorphGrid(page);
     await setGrid(page, 4, 4);
+    await openMotion(page);
     for (const [, name] of VARIANTS) {
       await variantButton(page, name).click();
       await nextFrames(page);
@@ -176,13 +208,14 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 360, height: 740 }
     test('variation buttons are 44 px tall, tappable, no sideways scroll', async ({ page }) => {
       await page.getByRole('button', { name: 'Show controls', exact: true }).first().tap();
       await openMorphGrid(page, true);
+      await openMotion(page, true);
       for (const [, name] of VARIANTS) {
         const b = variantButton(page, name);
         await b.scrollIntoViewIfNeeded();
         expect((await b.boundingBox()).height).toBeGreaterThanOrEqual(44);
       }
       await variantButton(page, 'Swirl').tap();
-      await expect(variantButton(page, 'Swirl')).toHaveAttribute('aria-pressed', 'true');
+      await expect(variantButton(page, 'Swirl')).toHaveAttribute('aria-checked', 'true');
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       expect(overflow).toBeLessThanOrEqual(0);
     });

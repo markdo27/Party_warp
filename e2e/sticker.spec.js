@@ -593,7 +593,7 @@ test('goo melts the letters of each word together but keeps words apart', async 
 
 
 test('beginner panel keeps essentials visible and supports keyboard navigation', async ({ page }) => {
-  await expect(page.getByRole('radiogroup', { name: 'Design', exact: true }).getByRole('radio')).toHaveText(['Sticker', 'Marquee', 'Wallpaper', 'Oval', 'Morph grid']);
+  await expect(page.getByRole('radiogroup', { name: 'Layout', exact: true }).getByRole('radio')).toHaveText(['Sticker', 'Marquee', 'Wallpaper', 'Oval', 'Morph grid']);
   await expect(page.getByRole('button', { name: 'Advanced type', exact: true })).toHaveAttribute('aria-expanded', 'false');
   await page.getByLabel('Sticker text', { exact: true }).fill('KEEP IT GOOEY');
   await page.getByRole('tab', { name: 'Content', exact: true }).press('ArrowRight');
@@ -603,11 +603,13 @@ test('beginner panel keeps essentials visible and supports keyboard navigation',
   await page.getByRole('tab', { name: 'Style', exact: true }).press('ArrowRight');
   await expect(page.getByRole('tab', { name: 'Motion', exact: true })).toBeFocused();
   await expect(page.getByRole('slider', { name: 'Wave detail', exact: true })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Wild', exact: true }).click();
+  await page.getByRole('radio', { name: 'Wild', exact: true }).click();
+  await expect(page.getByRole('radio', { name: 'Wild', exact: true })).toHaveAttribute('aria-checked', 'true');
   await expect(page.getByRole('slider', { name: 'Speed', exact: true })).toHaveValue('1.4');
   await expect(page.getByRole('slider', { name: 'Wobble', exact: true })).toHaveValue('0.85');
   await page.getByRole('slider', { name: 'Speed', exact: true }).press('ArrowRight');
-  await expect(page.getByRole('button', { name: 'Wild', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByRole('radio', { name: 'Wild', exact: true })).toHaveAttribute('aria-checked', 'false');
+  await expect(page.getByText('Custom', { exact: true })).toBeVisible();
   await page.getByRole('tab', { name: 'Motion', exact: true }).press('End');
   await expect(page.getByRole('tab', { name: 'Export', exact: true })).toBeFocused();
   await expect(page.getByRole('button', { name: 'PNG', exact: true })).toBeVisible();
