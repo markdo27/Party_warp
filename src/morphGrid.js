@@ -139,6 +139,77 @@ export const holdTail = (inHold) => HOLD_TAIL_LEVEL * (1 - smoothstep(0, HOLD_TA
 /** Seconds one cell lags behind cell (0, 0). */
 export const cellDelay = (col, row, colDelay, rowDelay) => col * colDelay + row * rowDelay;
 
+/**
+ * Variations of the Morph grid. Each one only changes how far a cell lags behind cell (0, 0);
+ * the lag never depends on time, so every variation loops on the same morphCycle.
+ * 'classic' keeps the shipped column / row lag sliders.
+ */
+export const MORPH_VARIANTS = Object.freeze([
+  Object.freeze({ id: 'classic', name: 'Classic', hint: 'Sweeps row by row, from the top-left cell to the bottom-right one.' }),
+  Object.freeze({ id: 'horizontal', name: 'Horizontal wave', hint: 'Whole columns change together; the wave runs left to right.' }),
+  Object.freeze({ id: 'diagonal', name: 'Diagonal wave', hint: 'Diagonal lines change together, from the top-left corner.' }),
+  Object.freeze({ id: 'swirl', name: 'Swirl', hint: 'The change turns clockwise around the centre, starting at 12 o’clock.' }),
+  Object.freeze({ id: 'checker', name: 'Checker', hint: 'Two checkerboard groups take turns, half a letter apart.' }),
+  Object.freeze({ id: 'pulse', name: 'Pulse', hint: 'Cells change in a scattered order, always on one of four beats.' }),
+]);
+export const MORPH_VARIANT_IDS = Object.freeze(MORPH_VARIANTS.map((v) => v.id));
+export const DEFAULT_MORPH_VARIANT = 'classic';
+const H_STEP = 0.12; // share of a slot per column
+const D_STEP = 0.1; // share of a slot per diagonal step
+const SWIRL_TURN = 0.75; // share of a slot for one turn around the centre
+const SWIRL_OUT = 0.25; // share of a slot from the centre to the farthest cell
+const CHECKER_SHIFT = 0.5; // share of a slot between the two checker groups
+export const PULSE_BEATS = 4; // pulse beats per slot
+export const PULSE_SEED = 0x5eed2026;
+
+/** A known variation id, or 'classic' for anything else. */
+export const morphVariantId = (value) => (MORPH_VARIANT_IDS.includes(value) ? value : DEFAULT_MORPH_VARIANT);
+
+/** The pulse beat (0-3) of a cell: a fixed hash of (col, row), so resizing never reshuffles. */
+export function pulseBeat(col, row) {
+  let h = Math.imul(col + 1, 0x27d4eb2d) ^ Math.imul(row + 1, 0x165667b1) ^ PULSE_SEED;
+  h ^= h >>> 15;
+  h = Math.imul(h, 0x2c1b3c6d);
+  h ^= h >>> 12;
+  h = Math.imul(h, 0x297a2d39);
+  h ^= h >>> 15;
+  return (h >>> 0) % PULSE_BEATS;
+}
+
+/** Turn (0-1) of a cell around the grid centre: 0 at 12 o'clock, clockwise on screen. */
+export function swirlTurn(col, row, cols, rows) {
+  const dx = (col - (cols - 1) / 2) * MORPH_CELL_ASPECT;
+  const dy = row - (rows - 1) / 2;
+  if (Math.hypot(dx, dy) < 1e-9) return 0;
+  return mod(Math.atan2(dx, -dy) / (2 * Math.PI), 1);
+}
+
+function swirlShare(col, row, cols, rows) {
+  const cx = (cols - 1) / 2;
+  const cy = (rows - 1) / 2;
+  const radius = (x, y) => Math.hypot((x - cx) * MORPH_CELL_ASPECT, y - cy);
+  const r = radius(col, row);
+  if (r < 1e-9) return 0;
+  const rMax = radius(0, 0); // a corner cell is always the farthest one
+  return swirlTurn(col, row, cols, rows) * SWIRL_TURN + (r / rMax) * SWIRL_OUT;
+}
+
+/**
+ * Seconds a cell lags behind cell (0, 0) for a variation. New variations scale with the slot
+ * (hold + melt), so their shape stays the same when Hold or Melt change.
+ */
+export function variantDelay(variant, col, row, { cols, rows, hold, melt, colDelay, rowDelay }) {
+  const slot = hold + melt;
+  switch (morphVariantId(variant)) {
+    case 'horizontal': return col * H_STEP * slot;
+    case 'diagonal': return (col + row) * D_STEP * slot;
+    case 'swirl': return swirlShare(col, row, cols, rows) * slot;
+    case 'checker': return ((col + row) % 2) * CHECKER_SHIFT * slot;
+    case 'pulse': return (pulseBeat(col, row) / PULSE_BEATS) * slot;
+    default: return cellDelay(col, row, colDelay, rowDelay);
+  }
+}
+
 /** One loop of `count` glyphs, each held for `hold` then melted over `melt` seconds. */
 export const morphCycle = (count, hold, melt) => count * (hold + melt);
 
@@ -188,15 +259,17 @@ export function morphCellState(seconds, count, hold, melt, stages = MORPH_THEME.
 
 /**
  * All `cols × rows` cells (3 × 3 when missing) at global time `time` (seconds), row-major
- * from the top-left cell. `still` (reduced motion) drops the rings and the tint and keeps
+ * from the top-left cell. `variant` (one of MORPH_VARIANT_IDS, 'classic' when missing) picks
+ * the lag of each cell. `still` (reduced motion) drops the rings and the tint and keeps
  * every glyph whole.
  */
-export function morphGridFrame(time, { cols, rows, count, hold, melt, colDelay, rowDelay, still = false }) {
+export function morphGridFrame(time, { cols, rows, count, hold, melt, colDelay, rowDelay, variant, still = false }) {
   const dims = gridDims(cols, rows);
+  const lag = { ...dims, hold, melt, colDelay, rowDelay };
   const cells = [];
   for (let row = 0; row < dims.rows; row++) {
     for (let col = 0; col < dims.cols; col++) {
-      const local = time + MORPH_START_OFFSET_S - cellDelay(col, row, colDelay, rowDelay);
+      const local = time + MORPH_START_OFFSET_S - variantDelay(variant, col, row, lag);
       const state = morphCellState(local, count, hold, melt);
       cells.push(still
         ? { ...state, to: state.from, mix: 0, halo: 0, tint: 0, melting: false, col, row }

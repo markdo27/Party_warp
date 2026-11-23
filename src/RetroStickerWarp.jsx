@@ -41,6 +41,9 @@ import {
   morphCycle,
   morphGlyphList,
   morphGridFrame,
+  morphVariantId,
+  DEFAULT_MORPH_VARIANT,
+  MORPH_VARIANTS,
 } from './morphGrid.js';
 import { createMorphGridRenderer } from './morphGridRenderer.js';
 import {
@@ -285,6 +288,7 @@ export const DEFAULTS = Object.freeze({
   morphHalo: 1,
   morphCols: DEFAULT_MORPH_COLS,
   morphRows: DEFAULT_MORPH_ROWS,
+  morphVariant: DEFAULT_MORPH_VARIANT,
 });
 
 export const RANGES = Object.freeze({
@@ -367,6 +371,7 @@ export function sanitizeParams(input = {}) {
     morphGlyphs: typeof merged.morphGlyphs === 'string'
       ? merged.morphGlyphs.replace(CONTROL_RE, '').replace(/[\r\n\t]/g, '').slice(0, MORPH_GLYPHS_MAX_CHARS)
       : DEFAULTS.morphGlyphs,
+    morphVariant: morphVariantId(merged.morphVariant),
   };
 }
 
@@ -2924,6 +2929,7 @@ export function morphCells(p, time, still = false) {
     melt: p.morphMelt,
     colDelay: p.morphColDelay,
     rowDelay: p.morphRowDelay,
+    variant: p.morphVariant,
     still,
   });
 }
@@ -4179,15 +4185,17 @@ export default function RetroStickerWarp({
   /* ── Export ── */
 
   const exportScope = bandLike ? params.exportScope : 'whole';
+  const { morphVariant } = params;
   const exportBase = useCallback(
     (suffix = '') => {
       const parts = [fileNameFor(logo ? [logo.name.replace(/\.svg$/i, '')] : lines).replace(/\.png$/, '')];
       if (design !== 'sticker') parts.push(DESIGN_INFO[design].name.toLowerCase());
+      if (design === 'morphGrid' && morphVariant !== DEFAULT_MORPH_VARIANT) parts.push(morphVariant);
       if (exportScope === 'line') parts.push('line');
       if (suffix) parts.push(suffix);
       return parts.join('-');
     },
-    [logo, lines, design, exportScope],
+    [logo, lines, design, exportScope, morphVariant],
   );
 
   /** Frames an export of the live design; `kind` is 'still', 'svg' or 'motion'. */
@@ -4382,6 +4390,7 @@ export default function RetroStickerWarp({
   const morphReading = morphGlyphList(params.morphGlyphs, graphemes).join(' → ');
   const morphGridSize = `${params.morphCols} × ${params.morphRows} grid`;
   const morphNotice = morphGlyphNotice(params.morphGlyphs);
+  const morphVariantHint = MORPH_VARIANTS.find((v) => v.id === params.morphVariant)?.hint ?? MORPH_VARIANTS[0].hint;
   const reading = sequenceEnabled ? messageTexts.map((message) => displayLines(message, params.caps).join(' ')).join(' → ') || 'empty' : logo ? `${logo.name}${oneLine ? ` — ${tagline.replace(/\n/g, ' ')}` : ''}` : oneLine
     ? `${bandLine(lines) || 'empty'} — ${tagline.replace(/\n/g, ' ')}`
     : lines.join(' ').trim() || 'empty';
@@ -4680,13 +4689,33 @@ export default function RetroStickerWarp({
               />
               <p id="rsw-morph-glyphs-notice" aria-live="polite" className="min-h-0 text-[11px] font-medium leading-relaxed text-[#ffc8f8] empty:hidden">{morphNotice ?? ''}</p>
               <p id="rsw-morph-glyphs-help" className="text-[11px] leading-relaxed text-white/55">Each letter melts into the next, then the loop starts over. 2 to 6 letters; spaces are skipped. Reading: {morphReading}</p>
+              <div role="group" aria-labelledby="rsw-morph-variant-label" aria-describedby="rsw-morph-variant-hint" className="space-y-2">
+                <p id="rsw-morph-variant-label" className="text-[12px] text-white/70">Variation</p>
+                <div className="grid grid-cols-3 gap-2">
+                  {MORPH_VARIANTS.map(({ id, name }) => {
+                    const active = params.morphVariant === id;
+                    return (
+                      <button key={id} type="button" aria-pressed={active} data-variant={id}
+                        onClick={() => update('morphVariant', id)}
+                        className={`min-h-[44px] rounded-xl border px-2 py-2 text-[12px] font-medium leading-tight transition-colors ${focusRing} ${active ? 'border-[#ffc8f8]/70 bg-[#ffc8f8]/10 text-white' : 'border-white/10 text-white/70 hover:bg-white/[0.06]'}`}>
+                        {name}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p id="rsw-morph-variant-hint" aria-live="polite" className="text-[11px] leading-relaxed text-white/55">{morphVariantHint}</p>
+              </div>
               <Slider label="Columns" value={params.morphCols} range={RANGES.morphCols} format={(v) => String(v)} onChange={(v) => update('morphCols', v)} />
               <Slider label="Rows" value={params.morphRows} range={RANGES.morphRows} format={(v) => String(v)} onChange={(v) => update('morphRows', v)} />
               <p className="text-[11px] leading-relaxed text-white/55">{morphGridSize}, up to {MORPH_MAX_COLS} × {MORPH_MAX_ROWS}. Changing the grid keeps the loop running in time.</p>
               <Slider label="Hold each letter" value={params.morphHold} range={RANGES.morphHold} format={(v) => `${v.toFixed(2)}s`} onChange={(v) => update('morphHold', v)} />
               <Slider label="Melting time" value={params.morphMelt} range={RANGES.morphMelt} format={(v) => `${v.toFixed(2)}s`} onChange={(v) => update('morphMelt', v)} />
-              <Slider label="Column lag" value={params.morphColDelay} range={RANGES.morphColDelay} format={(v) => `${Math.round(v * 1000)} ms`} onChange={(v) => update('morphColDelay', v)} />
-              <Slider label="Row lag" value={params.morphRowDelay} range={RANGES.morphRowDelay} format={(v) => `${Math.round(v * 1000)} ms`} onChange={(v) => update('morphRowDelay', v)} />
+              {params.morphVariant === DEFAULT_MORPH_VARIANT && (
+                <>
+                  <Slider label="Column lag" value={params.morphColDelay} range={RANGES.morphColDelay} format={(v) => `${Math.round(v * 1000)} ms`} onChange={(v) => update('morphColDelay', v)} />
+                  <Slider label="Row lag" value={params.morphRowDelay} range={RANGES.morphRowDelay} format={(v) => `${Math.round(v * 1000)} ms`} onChange={(v) => update('morphRowDelay', v)} />
+                </>
+              )}
               <Slider label="Ring size" value={params.morphHalo} range={RANGES.morphHalo} format={(v) => `${Math.round(v * 100)}%`} onChange={(v) => update('morphHalo', v)} />
               <p className="text-[11px] leading-relaxed text-white/55">Full loop: {morphCycle(morphGlyphList(params.morphGlyphs, graphemes).length, params.morphHold, params.morphMelt).toFixed(2)}s. Reduced motion shows the letters still, without rings.</p>
             </Section>}
