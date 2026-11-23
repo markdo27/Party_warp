@@ -157,6 +157,15 @@ test('D1/D2: letters, grid, wave pattern, palette and the paused clock survive a
   await expect(page.getByRole('radio', { name: 'Swirl', exact: true })).toHaveAttribute('aria-checked', 'true');
 });
 
+test('Reset settings on Morph grid returns to the Reference look', async ({ page }) => {
+  await openMorphGrid(page);
+  await tab(page, 'Style').click();
+  await chip(page, 'Cosmic').click();
+  await expect(chip(page, 'Reference')).toHaveAttribute('aria-pressed', 'false');
+  await page.getByRole('button', { name: 'Reset settings', exact: true }).click();
+  await expect(chip(page, 'Reference')).toHaveAttribute('aria-pressed', 'true');
+});
+
 test('C4: the loop line follows Speed and says when Speed 0 pauses it', async ({ page }) => {
   await openMorphGrid(page);
   await tab(page, 'Motion').click();
@@ -220,6 +229,33 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 360, height: 740 }
       await expect(page.getByRole('radiogroup', { name: 'Wave pattern', exact: true })).toBeInViewport();
       await evidence(page, `mobile_${tag}_morph_motion.png`);
       expect(await overflowX(page)).toBeLessThanOrEqual(0);
+    });
+
+    // F1: same element set and box measurement as qa-unified-ux/qa-mobile.mjs (the box itself, not a hit-area pseudo).
+    test('F1: every toolbar and panel target is at least 44 × 44 px (Sticker and Morph grid, all tabs)', async ({ page }) => {
+      const tooSmall = (scope) => page.locator(scope).first().evaluate((root) => [...root.querySelectorAll('button,[role=radio],[role=tab],summary,input:not([type=range]):not([type=color]):not(.sr-only)')]
+        .filter((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden'; })
+        .map((e) => { const r = e.getBoundingClientRect(); return { n: (e.getAttribute('aria-label') || e.textContent).trim().slice(0, 24), w: Math.round(r.width), h: Math.round(r.height) }; })
+        .filter((x) => x.w < 44 || x.h < 44));
+      const found = {};
+      const sweep = async (layout) => {
+        await page.getByRole('button', { name: 'Hide controls', exact: true }).tap();
+        found[`${layout} toolbar`] = await tooSmall('[role=toolbar]');
+        await page.getByRole('button', { name: 'Show controls', exact: true }).first().tap();
+        for (const t of ['Content', 'Style', 'Motion', 'Export']) {
+          await tab(page, t).tap();
+          found[`${layout} ${t}`] = await tooSmall('aside');
+          expect(await overflowX(page)).toBeLessThanOrEqual(0);
+        }
+      };
+      await page.getByRole('button', { name: 'Show controls', exact: true }).first().tap();
+      await sweep('Sticker');
+      await tab(page, 'Content').tap();
+      await openMorphGrid(page, true);
+      await sweep('Morph');
+      expect(Object.fromEntries(Object.entries(found).filter(([, v]) => v.length))).toEqual({});
+      await tab(page, 'Motion').tap();
+      await expect(page.getByRole('radiogroup', { name: 'Wave pattern', exact: true })).toBeInViewport();
     });
   });
 }

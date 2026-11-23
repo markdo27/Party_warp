@@ -3071,6 +3071,8 @@ const STYLES = `
 .rsw-range{-webkit-appearance:none;appearance:none;width:100%;height:24px;background:transparent;cursor:pointer;touch-action:pan-y}
 .rsw-range:focus{outline:none}
 @media (pointer:coarse){.rsw-range{height:44px}}
+/* Touch / narrow screens: every control in the toolbar and panel is at least 44x44 (WCAG 2.5.5). Desktop untouched. */
+@media (pointer:coarse),(max-width:640px){.rsw-touch :is(button,[role=tab],[role=radio],summary,input:not([type=range]):not([type=color]):not(.sr-only)){min-height:44px!important;min-width:44px!important}}
 .rsw-range::-webkit-slider-runnable-track{height:4px;border-radius:999px;background:linear-gradient(90deg,${ACCENT} var(--pct),rgba(255,255,255,.12) var(--pct))}
 .rsw-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:16px;height:16px;margin-top:-6px;border:0;border-radius:999px;background:#fff;box-shadow:0 0 0 3px rgba(255,200,248,.22),0 2px 6px rgba(0,0,0,.6);transition:transform .12s}
 .rsw-range:active::-webkit-slider-thumb{transform:scale(1.18)}
@@ -4223,7 +4225,8 @@ export default function RetroStickerWarp({
   }, [bandLike, params.bandTheme, applyPalette, update]);
 
   const resetSettings = useCallback(() => {
-    setParams((prev) => sanitizeParams({ ...initialSettings, ...DESIGN_LOOKS[prev.design], design: prev.design }));
+    // Morph grid resets to its Reference look, like a first visit.
+    setParams((prev) => sanitizeParams({ ...initialSettings, ...DESIGN_LOOKS[prev.design], design: prev.design, morphReference: prev.design === 'morphGrid' }));
     notify('info', 'Settings reset');
   }, [initialSettings, notify]);
 
@@ -4597,7 +4600,7 @@ export default function RetroStickerWarp({
           <div
             role="toolbar"
             aria-label="Sticker actions"
-            className="flex items-center gap-0.5 rounded-2xl border border-white/10 bg-[#0c0c0f]/85 p-1.5 shadow-[0_18px_50px_-18px_rgba(0,0,0,0.9)] backdrop-blur-xl"
+            className="rsw-touch flex items-center gap-0.5 rounded-2xl border border-white/10 bg-[#0c0c0f]/85 p-1.5 shadow-[0_18px_50px_-18px_rgba(0,0,0,0.9)] backdrop-blur-xl"
           >
             <ToolButton label={playing ? 'Pause' : 'Play'} onClick={() => setPlaying((p) => !p)}>
               {playing ? <Pause size={18} aria-hidden /> : <Play size={18} aria-hidden />}
@@ -4684,7 +4687,7 @@ export default function RetroStickerWarp({
         <aside
           ref={panelRef}
           aria-label="Sticker controls"
-          className="absolute inset-x-2 bottom-2 z-30 flex max-h-[62dvh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#0c0c0f]/90 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.95)] backdrop-blur-xl md:inset-x-auto md:bottom-4 md:right-4 md:top-4 md:max-h-none md:w-[360px]"
+          className="rsw-touch absolute inset-x-2 bottom-2 z-30 flex max-h-[62dvh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#0c0c0f]/90 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.95)] backdrop-blur-xl md:inset-x-auto md:bottom-4 md:right-4 md:top-4 md:max-h-none md:w-[360px]"
         >
           <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-3">
             <div className="flex items-center gap-2">
@@ -5359,7 +5362,7 @@ export default function RetroStickerWarp({
               onClick={resetSettings}
               className={`inline-flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 py-2 text-[12px] text-white/75 hover:bg-white/[0.06] hover:text-white ${focusRing}`}
             >
-              <RotateCcw size={14} aria-hidden /> Reset look
+              <RotateCcw size={14} aria-hidden /> Reset settings
             </button>
           </div>
         </aside>
