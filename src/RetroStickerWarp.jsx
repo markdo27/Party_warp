@@ -27,6 +27,8 @@
  */
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { loadSvgLogo } from './svgLogo.js';
+import { DEFAULT_MORPH_GLYPHS, MORPH_THEME, morphCycle, morphGlyphList, morphGridFrame } from './morphGrid.js';
+import { createMorphGridRenderer } from './morphGridRenderer.js';
 import {
   AlignCenter,
   AlignLeft,
@@ -42,6 +44,7 @@ import {
   FileCode2,
   FileImage,
   FileUp,
+  Grid3x3,
   Film,
   Images,
   LayoutGrid,
@@ -64,7 +67,7 @@ import {
   X,
 } from 'lucide-react';
 
-const DESIGN_ICONS = { sticker: Sticker, bands: Rows3, wallpaper: LayoutGrid, oval: Circle };
+const DESIGN_ICONS = { sticker: Sticker, bands: Rows3, wallpaper: LayoutGrid, oval: Circle, morphGrid: Grid3x3 };
 const PANEL_TABS = ['Content', 'Style', 'Motion', 'Export'];
 const MOTION_PRESETS = [
   { name: 'Gentle', settings: { speed: 0.6, intensity: 0.2, frequency: 0.7, swell: 0.2, stretch: 0.15, italic: 0.1, boil: false } },
@@ -186,6 +189,7 @@ export const DESIGN_LOOKS = Object.freeze({
   bands: { pad: 0.13, stroke: 0.065, stretch: 0.8, italic: 0.3, intensity: 0.4, tracking: -0.02 },
   wallpaper: { pad: 0.16, stroke: 0.1, stretch: 0.35, italic: 0.25, intensity: 0.45, tracking: -0.01 },
   oval: { pad: 0.07, stroke: 0.1, stretch: 0.2, italic: 0.12, intensity: 0.3, tracking: -0.01, align: 'center', sticker: true },
+  morphGrid: { speed: 1 },
 });
 
 /** The variations. `line` designs set the lockup on one line; the others keep its rows. */
@@ -194,9 +198,13 @@ export const DESIGN_INFO = Object.freeze({
   bands: { name: 'Marquee', blurb: 'Scrolling colour bands repeat the text with a tagline.', line: true },
   wallpaper: { name: 'Wallpaper', blurb: 'A tilted sticker-bomb tiling with alternating colourways.', line: false },
   oval: { name: 'Oval', blurb: 'Type a name or initials inside a soft oval ring. The frame grows to fit your text.', line: false },
+  morphGrid: { name: 'Morph grid', blurb: 'A 3 × 3 grid of letters that melt into each other in a wave, with flat colour rings.', line: false },
 });
 export const DESIGNS = Object.keys(DESIGN_INFO);
-const MODE_INDEX = Object.freeze({ sticker: 0, bands: 1, wallpaper: 2, oval: 3 });
+const MODE_INDEX = Object.freeze({ sticker: 0, bands: 1, wallpaper: 2, oval: 3, morphGrid: 0 });
+const MORPH_GLYPHS_MAX_CHARS = 12;
+const MORPH_EXPORT_PX = [1080, 1350]; // 4:5, like the reference video
+const MORPH_PREVIEW_FPS = 12; // the reference runs at 12 fps
 
 const ALIGNS = ['zigzag', 'left', 'center', 'right'];
 const EXPORT_SCOPES = ['whole', 'line'];
@@ -255,6 +263,12 @@ export const DEFAULTS = Object.freeze({
   motionSeconds: 4,
   motionFps: 30,
   motionRatio: 'fit',
+  morphGlyphs: DEFAULT_MORPH_GLYPHS,
+  morphHold: 0.95,
+  morphMelt: 0.7,
+  morphColDelay: 0.085,
+  morphRowDelay: 0.46,
+  morphHalo: 1,
 });
 
 export const RANGES = Object.freeze({
@@ -286,6 +300,11 @@ export const RANGES = Object.freeze({
   dither: { min: 0, max: 1, step: 0.01 },
   ditherLevels: { min: 2, max: 8, step: 1 },
   ditherPixel: { min: 1, max: 8, step: 1 },
+  morphHold: { min: 0.3, max: 4, step: 0.05 },
+  morphMelt: { min: 0.2, max: 3, step: 0.05 },
+  morphColDelay: { min: 0, max: 0.5, step: 0.005 },
+  morphRowDelay: { min: 0, max: 1.5, step: 0.01 },
+  morphHalo: { min: 0, max: 2, step: 0.01 },
 });
 
 /* ── Validation & text helpers (pure) ─────────────────────────────────────── */
@@ -327,6 +346,9 @@ export function sanitizeParams(input = {}) {
     motionSeconds: oneOf('motionSeconds', MOTION_SECONDS),
     motionFps: oneOf('motionFps', MOTION_FPS),
     motionRatio: oneOf('motionRatio', MOTION_RATIOS),
+    morphGlyphs: typeof merged.morphGlyphs === 'string'
+      ? merged.morphGlyphs.replace(CONTROL_RE, '').replace(/[\r\n\t]/g, '').slice(0, MORPH_GLYPHS_MAX_CHARS)
+      : DEFAULTS.morphGlyphs,
   };
 }
 
@@ -799,7 +821,7 @@ export function designLayout({ design, scene, tagBox, params, stage, free }) {
     });
   }
 
-  if (design === 'sticker') {
+  if (design === 'sticker' || design === 'morphGrid') {
     const bounds = stickerBounds(scene.inkBox, params);
     if (scene.isSequence) {
       bounds.x -= 0.45;
@@ -2873,6 +2895,12 @@ const prefersReducedMotion = () =>
 
 const currentDpr = () => clamp(window.devicePixelRatio || 1, 1, 2);
 
+/** The nine Morph grid cells at `time` seconds for these settings. */
+export function morphCells(p, time, still = false) {
+  const count = morphGlyphList(p.morphGlyphs, graphemes).length;
+  return morphGridFrame(time, { count, hold: p.morphHold, melt: p.morphMelt, colDelay: p.morphColDelay, rowDelay: p.morphRowDelay, still });
+}
+
 /**
  * Stretch + italic state for one frame: break points and slants per row (the caret and
  * selection follow the letters with them), the per-texel offset/letter texture and the
@@ -3337,6 +3365,9 @@ export default function RetroStickerWarp({
   const rasterRef = useRef(null);
   const tagRasterRef = useRef(null);
   const rendererRef = useRef(null);
+  const morphCanvasRef = useRef(null);
+  const morphRef = useRef(null);
+  const [morphVersion, setMorphVersion] = useState(0);
   const liveRef = useRef(null);
   const dirtyRef = useRef(true);
   const clockRef = useRef({ time: 0, shown: 0, scroll: 0, shownScroll: 0, seed: 0 });
@@ -3349,7 +3380,7 @@ export default function RetroStickerWarp({
 
   const { design } = params;
   // Oval is an editable text layout; keep an uploaded logo available for the other layouts.
-  const logo = design === 'oval' ? null : uploadedLogo;
+  const logo = design === 'oval' || design === 'morphGrid' ? null : uploadedLogo;
   const oneLine = DESIGN_INFO[design].line; // the lockup set on one line, with a tagline
   const isSticker = design === 'sticker' || design === 'oval'; // layouts with direct text editing
   const sequenceEnabled = design === 'sticker' && !logo && params.messageLoop;
@@ -3468,6 +3499,51 @@ export default function RetroStickerWarp({
     };
   }, []);
 
+  // Morph grid renderer: its own WebGL2 canvas over the stage (incl. context loss). The canvas
+  // only exists while the Morph grid design is picked, so other designs keep a single context.
+  const morphActive = design === 'morphGrid';
+  useEffect(() => {
+    const canvas = morphCanvasRef.current;
+    if (!morphActive || !canvas) return undefined;
+    let morph = null;
+    const start = () => {
+      try {
+        morph = createMorphGridRenderer(canvas, { sdf: signedDistanceField });
+        morphRef.current = morph;
+        setMorphVersion((v) => v + 1);
+      } catch (err) {
+        console.error('[RetroStickerWarp] morph grid renderer failed to start', err);
+        morphRef.current = null;
+      }
+    };
+    const onLost = (event) => {
+      event.preventDefault();
+      morph = null;
+      morphRef.current = null;
+    };
+    canvas.addEventListener('webglcontextlost', onLost);
+    canvas.addEventListener('webglcontextrestored', start);
+    start();
+    return () => {
+      canvas.removeEventListener('webglcontextlost', onLost);
+      canvas.removeEventListener('webglcontextrestored', start);
+      morph?.dispose();
+      morphRef.current = null;
+    };
+  }, [morphActive]);
+
+  // Dev-only seek, so E2E checks can line frames up with the reference keyframes.
+  useEffect(() => {
+    if (!import.meta.env?.DEV) return undefined;
+    window.__rswSeek = (seconds) => {
+      clockRef.current = { ...clockRef.current, time: seconds, shown: seconds };
+      dirtyRef.current = true;
+    };
+    return () => {
+      delete window.__rswSeek;
+    };
+  }, []);
+
   // Typeface loading, with a timeout so a slow network falls back instead of stalling.
   // Uploaded fonts are already loaded into document.fonts when they're registered.
   const { family: fontFamily, uploaded: fontUploaded } = fontEntry;
@@ -3491,6 +3567,20 @@ export default function RetroStickerWarp({
       clearTimeout(timer);
     };
   }, [fontFamily, fontUploaded, notify]);
+
+  // Morph grid letters: rasterised once per glyph set and typeface.
+  const morphGlyphKey = morphGlyphList(params.morphGlyphs, graphemes).join('\u0000');
+  useEffect(() => {
+    const morph = morphRef.current;
+    if (!morph || design !== 'morphGrid' || !fontState.family) return;
+    try {
+      morph.setGlyphs(morphGlyphKey.split('\u0000'), fontState.family);
+      dirtyRef.current = true;
+    } catch (err) {
+      console.error('[RetroStickerWarp] morph grid glyphs failed', err);
+      notify('error', 'Could not draw the Morph grid letters.');
+    }
+  }, [morphGlyphKey, fontState, design, morphVersion, notify]);
 
   // The built-in tagline face, fetched the first time a tagline shows in it.
   useEffect(() => {
@@ -3689,6 +3779,7 @@ export default function RetroStickerWarp({
       rowGeom,
       caretEm,
       selectionEm,
+      free,
       dpr: currentDpr(),
     };
     dirtyRef.current = true;
@@ -3728,6 +3819,23 @@ export default function RetroStickerWarp({
       }
       if (!due) return;
       dirtyRef.current = false;
+      if (live.params.design === 'morphGrid') {
+        const morph = morphRef.current;
+        if (!morph?.ready) {
+          dirtyRef.current = true; // letters still loading
+          return;
+        }
+        try {
+          const { shown } = clockRef.current;
+          const t = live.playing ? Math.floor(shown * MORPH_PREVIEW_FPS) / MORPH_PREVIEW_FPS : shown;
+          const still = prefersReducedMotion(); // static letters, no rings or fringe
+          morph.render({ cells: morphCells(live.params, t, still), rect: live.free, dpr: live.dpr, haloScale: live.params.morphHalo, still });
+        } catch (err) {
+          if (!reported) console.error('[RetroStickerWarp] morph grid render failed', err);
+          reported = true;
+        }
+        return;
+      }
       try {
         const clock = clockRef.current;
         const stretch = stretchForFrame(live, clock, stretchCacheRef.current);
@@ -4065,11 +4173,27 @@ export default function RetroStickerWarp({
     return { renderer, live, framing, frameAt };
   }, []);
 
+  /** Morph grid export: its own 4:5 (or chosen ratio) canvas, independent of the text layout. */
+  const prepareMorphExport = useCallback((kind) => {
+    const morph = morphRef.current;
+    const live = liveRef.current;
+    if (!morph?.ready || !live) throw new Error('The Morph grid is still loading its letters.');
+    const p = live.params;
+    const [width, height] = kind === 'motion' && p.motionRatio !== 'fit' ? MOTION_CANVAS_PX[p.motionRatio] : MORPH_EXPORT_PX;
+    const pixelsAt = (time) => morph.readPixels({ cells: morphCells(p, time), width, height, haloScale: p.morphHalo });
+    const count = morphGlyphList(p.morphGlyphs, graphemes).length;
+    return { live, width, height, pixelsAt, loopSeconds: morphCycle(count, p.morphHold, p.morphMelt) };
+  }, []);
+
   const renderSnapshot = useCallback(() => {
+    if (liveRef.current?.params.design === 'morphGrid') {
+      const { width, height, pixelsAt } = prepareMorphExport('still');
+      return pixelsToCanvas(pixelsAt(clockRef.current.shown), width, height);
+    }
     const { renderer, live, frameAt } = prepareExport('still');
     const frame = frameAt(clockRef.current, stretchRef.current, live.params.transparent ? 0 : 1);
     return pixelsToCanvas(renderer.readPixels(frame), frame.width, frame.height);
-  }, [prepareExport]);
+  }, [prepareExport, prepareMorphExport]);
 
   const downloadPng = useCallback(async () => {
     try {
@@ -4109,6 +4233,10 @@ export default function RetroStickerWarp({
 
   const downloadSvg = useCallback(async () => {
     if (job) return;
+    if (liveRef.current?.params.design === 'morphGrid') {
+      notify('warn', 'SVG export is not available for Morph grid yet. Use PNG or video.');
+      return;
+    }
     setJob({ kind: 'svg', label: 'Tracing SVG…', progress: null });
     try {
       await new Promise((r) => setTimeout(r, 30)); // let the progress pill paint first
@@ -4130,21 +4258,25 @@ export default function RetroStickerWarp({
     async (kind) => {
       if (job) return;
       let setup;
+      let morphSetup = null;
       try {
-        setup = prepareExport('motion');
+        if (liveRef.current?.params.design === 'morphGrid') morphSetup = prepareMorphExport('motion');
+        else setup = prepareExport('motion');
       } catch (err) {
         notify('error', err instanceof Error ? err.message : 'Nothing to export yet.');
         return;
       }
-      const { renderer, live, framing, frameAt } = setup;
+      const { renderer, live, framing, frameAt } = setup ?? { live: morphSetup.live, framing: morphSetup };
       const { motionFps: fps } = live.params;
       const fullLoop = live.scene?.isSequence && live.params.exportMessageLoop;
-      const seconds = fullLoop ? live.scene.messageCount * (live.params.messageHold + live.params.messageMelt) : live.params.motionSeconds;
+      const seconds = morphSetup
+        ? Math.round(morphSetup.loopSeconds * 100) / 100 // one whole loop, so the file loops seamlessly
+        : fullLoop ? live.scene.messageCount * (live.params.messageHold + live.params.messageMelt) : live.params.motionSeconds;
       const frames = Math.round(fps * seconds);
       const start = { ...clockRef.current, ...(fullLoop && { messages: 0 }) };
       const cache = {};
       const alpha = kind === 'frames' && live.params.transparent ? 0 : 1; // video stays opaque
-      const renderPixels = (i) => {
+      const renderPixels = morphSetup ? (i) => morphSetup.pixelsAt(start.shown + (i / fps) * live.params.speed) : (i) => {
         const mc = motionClock(i, fps, live.params);
         const clock = { ...start, shown: start.shown + mc.time, shownScroll: start.shownScroll + mc.scroll, seed: mc.seed, messages: (start.messages ?? 0) + i / fps };
         const stretch = stretchForFrame(live, clock, cache);
@@ -4187,7 +4319,7 @@ export default function RetroStickerWarp({
         dirtyRef.current = true; // the next live frame re-uploads its own stretch state
       }
     },
-    [job, prepareExport, exportBase, notify],
+    [job, prepareExport, prepareMorphExport, exportBase, notify],
   );
 
   /* ── Render ── */
@@ -4200,7 +4332,9 @@ export default function RetroStickerWarp({
   const ToastIcon = toast ? TOAST_ICONS[toast.tone] : null;
   const showToolbar = !(panelOpen && panelRect && panelRect.x <= stage.width * 0.35);
   const bandTheme = BAND_THEMES.find((t) => t.id === params.bandTheme) ?? BAND_THEMES[0];
-  const stageColor = design === 'bands' ? bandTheme.bands[0].bg : params.bg;
+  const isMorph = design === 'morphGrid';
+  const stageColor = design === 'bands' ? bandTheme.bands[0].bg : isMorph ? MORPH_THEME.bg : params.bg;
+  const morphReading = morphGlyphList(params.morphGlyphs, graphemes).join(' → ');
   const reading = sequenceEnabled ? messageTexts.map((message) => displayLines(message, params.caps).join(' ')).join(' → ') || 'empty' : logo ? `${logo.name}${oneLine ? ` — ${tagline.replace(/\n/g, ' ')}` : ''}` : oneLine
     ? `${bandLine(lines) || 'empty'} — ${tagline.replace(/\n/g, ' ')}`
     : lines.join(' ').trim() || 'empty';
@@ -4229,9 +4363,19 @@ export default function RetroStickerWarp({
         <canvas
           ref={canvasRef}
           className="absolute inset-0 block h-full w-full"
-          role="img"
-          aria-label={`${canvasLabel} reading: ${reading}`}
+          role={isMorph ? undefined : 'img'}
+          aria-hidden={isMorph || undefined}
+          aria-label={isMorph ? undefined : `${canvasLabel} reading: ${reading}`}
+          style={{ visibility: isMorph ? 'hidden' : 'visible' }}
         />
+        {isMorph && (
+          <canvas
+            ref={morphCanvasRef}
+            className="absolute inset-0 block h-full w-full"
+            role="img"
+            aria-label={`Morph grid reading: ${morphReading}`}
+          />
+        )}
         {canTypeOnStage && (
           <textarea
             ref={typeRef}
@@ -4312,7 +4456,7 @@ export default function RetroStickerWarp({
       </header>
 
       {/* Empty-state hint */}
-      {scene?.empty && !typing && (
+      {scene?.empty && !typing && !isMorph && (
         <div
           className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-dashed border-white/20 bg-black/40 px-5 py-3 text-center"
           style={{ left: centerX, top: free.y + free.height / 2 }}
@@ -4473,7 +4617,28 @@ export default function RetroStickerWarp({
               <p className="text-[11px] leading-relaxed text-white/60">{logo ? 'Your logo uses this layout. Adjust its colours and motion in the next tabs.' : DESIGN_INFO[design].blurb}</p>
             </Section>
 
-            {design !== 'oval' && <Section icon={FileUp} title="Use your SVG logo">
+            {isMorph && <Section icon={Grid3x3} title="Morph grid">
+              <label htmlFor="rsw-morph-glyphs" className="block text-[12px] text-white/70">Letters in the loop</label>
+              <input
+                id="rsw-morph-glyphs"
+                type="text"
+                value={params.morphGlyphs}
+                maxLength={MORPH_GLYPHS_MAX_CHARS}
+                spellCheck={false}
+                autoComplete="off"
+                onChange={(e) => update('morphGlyphs', e.target.value)}
+                className="block w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[14px] font-semibold tracking-wide text-white focus:border-[#ffc8f8]/60 focus:outline-none"
+              />
+              <p className="text-[11px] leading-relaxed text-white/55">Each letter melts into the next, then the loop starts over. 2 to 6 letters; spaces are skipped. Reading: {morphReading}</p>
+              <Slider label="Hold each letter" value={params.morphHold} range={RANGES.morphHold} format={(v) => `${v.toFixed(2)}s`} onChange={(v) => update('morphHold', v)} />
+              <Slider label="Melting time" value={params.morphMelt} range={RANGES.morphMelt} format={(v) => `${v.toFixed(2)}s`} onChange={(v) => update('morphMelt', v)} />
+              <Slider label="Column lag" value={params.morphColDelay} range={RANGES.morphColDelay} format={(v) => `${Math.round(v * 1000)} ms`} onChange={(v) => update('morphColDelay', v)} />
+              <Slider label="Row lag" value={params.morphRowDelay} range={RANGES.morphRowDelay} format={(v) => `${Math.round(v * 1000)} ms`} onChange={(v) => update('morphRowDelay', v)} />
+              <Slider label="Ring size" value={params.morphHalo} range={RANGES.morphHalo} format={(v) => `${Math.round(v * 100)}%`} onChange={(v) => update('morphHalo', v)} />
+              <p className="text-[11px] leading-relaxed text-white/55">Full loop: {morphCycle(morphGlyphList(params.morphGlyphs, graphemes).length, params.morphHold, params.morphMelt).toFixed(2)}s. Reduced motion shows the letters still, without rings.</p>
+            </Section>}
+
+            {design !== 'oval' && !isMorph && <Section icon={FileUp} title="Use your SVG logo">
               <p className="text-[12px] leading-relaxed text-white/60">Upload a logo instead of text. Its shape uses your chosen colours and goo effect.</p>
               <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-[#ffc8f8]/40 bg-[#ffc8f8]/5 px-3 py-3 text-[12px] font-medium text-[#ffc8f8] hover:bg-[#ffc8f8]/10 focus-within:ring-2 focus-within:ring-[#ffc8f8]/60">
                 {logoLoading ? <LoaderCircle size={16} className="animate-spin" aria-hidden /> : <FileUp size={16} aria-hidden />}
@@ -4493,7 +4658,7 @@ export default function RetroStickerWarp({
               {logoLoading && <button type="button" onClick={() => { logoRequestRef.current += 1; setLogoLoading(false); }} className={`rounded-lg px-2 py-1 text-[12px] text-white/70 ${focusRing}`}>Cancel upload</button>}
             </Section>}
 
-            <Section icon={TextCursorInput} title={logo ? "Logo settings" : "Write your message"}>
+            {!isMorph && <Section icon={TextCursorInput} title={logo ? "Logo settings" : "Write your message"}>
               {!logo && (<>
               {sequenceEnabled && <label htmlFor="rsw-main-message" className="block text-[12px] text-white/70">Message 1</label>}
               <textarea
@@ -4594,7 +4759,7 @@ export default function RetroStickerWarp({
                 />
               )}
               <Slider label={logo ? "Logo size" : "Text size"} value={params.fontSize} range={RANGES.fontSize} format={fmt.px} onChange={(v) => update('fontSize', v)} />
-            </Section>
+            </Section>}
 
             {!logo && <Section icon={Type} title="Advanced type" defaultOpen={false}>
               <FontPicker

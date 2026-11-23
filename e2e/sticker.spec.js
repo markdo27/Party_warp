@@ -593,7 +593,7 @@ test('goo melts the letters of each word together but keeps words apart', async 
 
 
 test('beginner panel keeps essentials visible and supports keyboard navigation', async ({ page }) => {
-  await expect(page.getByRole('radiogroup', { name: 'Design', exact: true }).getByRole('radio')).toHaveText(['Sticker', 'Marquee', 'Wallpaper', 'Oval']);
+  await expect(page.getByRole('radiogroup', { name: 'Design', exact: true }).getByRole('radio')).toHaveText(['Sticker', 'Marquee', 'Wallpaper', 'Oval', 'Morph grid']);
   await expect(page.getByRole('button', { name: 'Advanced type', exact: true })).toHaveAttribute('aria-expanded', 'false');
   await page.getByLabel('Sticker text', { exact: true }).fill('KEEP IT GOOEY');
   await page.getByRole('tab', { name: 'Content', exact: true }).press('ArrowRight');

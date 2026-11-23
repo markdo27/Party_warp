@@ -66,6 +66,7 @@ import {
   randomPalette,
   rowColToCaret,
   sanitizeInput,
+  morphCells,
   sanitizeParams,
   sanitizeTagline,
   selectionRects,
@@ -1050,9 +1051,11 @@ describe('designLayout', () => {
     designLayout({ design, scene, tagBox: null, params: sanitizeParams({ design }), stage, free, ...extra });
 
   it('picks a shader mode, a view and palettes for every design', () => {
-    DESIGNS.forEach((design, i) => {
+    // Morph grid draws on its own canvas; the main shader keeps the sticker mode (0) for it.
+    const expectedMode = { sticker: 0, bands: 1, wallpaper: 2, oval: 3, morphGrid: 0 };
+    DESIGNS.forEach((design) => {
       const L = layoutFor(design);
-      expect(L.mode).toBe(i);
+      expect(L.mode).toBe(expectedMode[design]);
       expect(L.view.pxPerEm).toBeGreaterThan(0);
       ['bg', 'sil', 'fill', 'line', 'tag'].forEach((k) => expect(L.palettes[k]).toHaveLength(9));
       expect(L.rows).toBeGreaterThan(0);
@@ -1146,5 +1149,35 @@ describe('fileNameFor', () => {
   it('slugifies the sticker text', () => {
     expect(fileNameFor(['SILENT', 'DISCO', 'PARTY'])).toBe('sticker-silent-disco-party.png');
     expect(fileNameFor(['', '  '])).toBe('sticker.png');
+  });
+});
+
+describe('morph grid params', () => {
+  it('defaults to the spec timing (6.6 s loop, 85 ms column and 460 ms row lag)', () => {
+    const p = sanitizeParams({ design: 'morphGrid' });
+    expect(p.design).toBe('morphGrid');
+    expect(p.morphGlyphs).toBe('Raum');
+    expect(p.morphColDelay).toBeCloseTo(0.085, 6);
+    expect(p.morphRowDelay).toBeCloseTo(0.46, 6);
+    expect(4 * (p.morphHold + p.morphMelt)).toBeCloseTo(6.6, 6);
+  });
+  it('clamps timings and strips control characters and line breaks from the letters', () => {
+    const p = sanitizeParams({ morphGlyphs: 'A\u0000B\nC\tD'.padEnd(40, 'x'), morphHold: 99, morphMelt: -1, morphHalo: 'nope' });
+    expect(p.morphGlyphs.startsWith('ABCD')).toBe(true);
+    expect(p.morphGlyphs.length).toBeLessThanOrEqual(12);
+    expect(p.morphHold).toBe(RANGES.morphHold.max);
+    expect(p.morphMelt).toBe(RANGES.morphMelt.min);
+    expect(p.morphHalo).toBe(DEFAULTS.morphHalo);
+    expect(sanitizeParams({ morphGlyphs: 42 }).morphGlyphs).toBe(DEFAULTS.morphGlyphs);
+  });
+  it('morphCells gives nine cells and drops rings in still mode', () => {
+    const p = sanitizeParams({ design: 'morphGrid' });
+    const live = morphCells(p, 1.25);
+    expect(live).toHaveLength(9);
+    expect(live.some((c) => c.halo > 0)).toBe(true);
+    morphCells(p, 1.25, true).forEach((c) => {
+      expect(c.halo).toBe(0);
+      expect(c.mix).toBe(0);
+    });
   });
 });
