@@ -6,3 +6,6 @@ playwright-report/
 .claude/
 *.log
 .env*
+
+# Face Collage: WASM copied from node_modules by scripts/face-collage-assets.mjs
+public/face-collage/wasm/

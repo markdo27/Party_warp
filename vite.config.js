@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
@@ -6,6 +7,12 @@ export default defineConfig({
   // Relative asset URLs, so the build works from a GitHub Pages sub-path.
   base: './',
   plugins: [react(), tailwindcss()],
+  // Face Collage prototype lives on its own page so the main app is untouched.
+  build: {
+    rollupOptions: {
+      input: { main: resolve(import.meta.dirname, 'index.html'), faceCollage: resolve(import.meta.dirname, 'face-collage.html') },
+    },
+  },
   // A launcher can assign the dev port through PORT; --port on the command line still wins.
   server: { port: Number(process.env.PORT) || 5173 },
   test: {

@@ -9,9 +9,13 @@
     "preview": "vite preview",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "face:assets": "node scripts/face-collage-assets.mjs",
+    "predev": "node scripts/face-collage-assets.mjs",
+    "prebuild": "node scripts/face-collage-assets.mjs"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "1.2.3",
     "lucide-react": "^1.47.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
