@@ -3073,6 +3073,9 @@ const STYLES = `
 @media (pointer:coarse){.rsw-range{height:44px}}
 /* Touch / narrow screens: every control in the toolbar and panel is at least 44x44 (WCAG 2.5.5). Desktop untouched. */
 @media (pointer:coarse),(max-width:640px){.rsw-touch :is(button,[role=tab],[role=radio],summary,input:not([type=range]):not([type=color]):not(.sr-only)){min-height:44px!important;min-width:44px!important}}
+/* Length has 3 chips, Frame rate 2: at 44px each, split the row 3/2 so the Length chips stay inside their group from 360 up; below 360 the two groups stack. */
+@media (pointer:coarse),(max-width:640px){.rsw-touch .rsw-len-fps{grid-template-columns:minmax(0,3fr) minmax(0,2fr)}}
+@media (max-width:359px){.rsw-touch .rsw-len-fps{grid-template-columns:minmax(0,1fr)}}
 .rsw-range::-webkit-slider-runnable-track{height:4px;border-radius:999px;background:linear-gradient(90deg,${ACCENT} var(--pct),rgba(255,255,255,.12) var(--pct))}
 .rsw-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:16px;height:16px;margin-top:-6px;border:0;border-radius:999px;background:#fff;box-shadow:0 0 0 3px rgba(255,200,248,.22),0 2px 6px rgba(0,0,0,.6);transition:transform .12s}
 .rsw-range:active::-webkit-slider-thumb{transform:scale(1.18)}
@@ -5257,7 +5260,7 @@ export default function RetroStickerWarp({
                 <Toggle label="Export full message loop" checked={params.exportMessageLoop} onChange={(v) => update('exportMessageLoop', v)} />
                 <p className="text-[11px] text-white/55">Includes all messages and the melt back to the first. PNG and SVG save the current frame.</p>
               </>}
-              <div className="grid grid-cols-2 gap-2">
+              <div className="rsw-len-fps grid grid-cols-2 gap-2">
                 {sequenceActive && params.exportMessageLoop ? <p className="self-center text-[12px] text-white/70">Full loop · {(messageTexts.length * (params.messageHold + params.messageMelt)).toFixed(1)}s</p> : <Segmented
                   label="Length"
                   value={params.motionSeconds}

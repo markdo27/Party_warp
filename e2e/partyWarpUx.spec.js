@@ -195,7 +195,7 @@ test('desktop evidence: Sticker and Morph grid at 1440 × 900', async ({ page })
   await evidence(page, 'desktop_1440_morph_style_cosmic.png');
 });
 
-for (const viewport of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
+for (const viewport of [{ width: 390, height: 844 }, { width: 360, height: 740 }, { width: 320, height: 640 }]) {
   test.describe(`mobile ${viewport.width} × ${viewport.height}`, () => {
     test.use({ viewport, hasTouch: true, isMobile: true });
 
@@ -237,6 +237,16 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 360, height: 740 }
         .filter((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden'; })
         .map((e) => { const r = e.getBoundingClientRect(); return { n: (e.getAttribute('aria-label') || e.textContent).trim().slice(0, 24), w: Math.round(r.width), h: Math.round(r.height) }; })
         .filter((x) => x.w < 44 || x.h < 44));
+      const spills = () => page.locator('aside').first().evaluate((root) => {
+        for (const d of root.querySelectorAll('details')) d.open = true;
+        return [...root.querySelectorAll('[role=radiogroup]')].flatMap((g) => {
+          const gr = g.getBoundingClientRect();
+          if (gr.width === 0) return [];
+          return [...g.querySelectorAll('[role=radio]')].map((e) => ({ e, r: e.getBoundingClientRect() }))
+            .filter(({ r }) => r.width > 0 && (r.left < gr.left - 0.5 || r.right > gr.right + 0.5 || r.top < gr.top - 0.5 || r.bottom > gr.bottom + 0.5))
+            .map(({ e, r }) => ({ group: g.getAttribute('aria-label'), n: e.getAttribute('aria-label'), over: Math.round(Math.max(gr.left - r.left, r.right - gr.right)) }));
+        });
+      });
       const found = {};
       const sweep = async (layout) => {
         await page.getByRole('button', { name: 'Hide controls', exact: true }).tap();
@@ -245,6 +255,8 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 360, height: 740 }
         for (const t of ['Content', 'Style', 'Motion', 'Export']) {
           await tab(page, t).tap();
           found[`${layout} ${t}`] = await tooSmall('aside');
+          // F2: every chip stays inside its group's border (no spill past the radiogroup box).
+          found[`${layout} ${t} spill`] = await spills();
           expect(await overflowX(page)).toBeLessThanOrEqual(0);
         }
       };
