@@ -4314,13 +4314,14 @@ export default function RetroStickerWarp({
       const { motionFps: fps } = live.params;
       const fullLoop = live.scene?.isSequence && live.params.exportMessageLoop;
       const seconds = morphSetup
-        ? Math.round(morphSetup.loopSeconds * 100) / 100 // one whole loop, so the file loops seamlessly
+        ? morphSetup.loopSeconds / (live.params.speed || 1)
         : fullLoop ? live.scene.messageCount * (live.params.messageHold + live.params.messageMelt) : live.params.motionSeconds;
-      const frames = Math.round(fps * seconds);
+      const frames = Math.max(1, Math.round(fps * seconds));
       const start = { ...clockRef.current, ...(fullLoop && { messages: 0 }) };
       const cache = {};
       const alpha = kind === 'frames' && live.params.transparent ? 0 : 1; // video stays opaque
-      const renderPixels = morphSetup ? (i) => morphSetup.pixelsAt(start.shown + (i / fps) * live.params.speed) : (i) => {
+      // Sample one exact cycle despite frame-count rounding; speed zero stays on the current pose.
+      const renderPixels = morphSetup ? (i) => morphSetup.pixelsAt(start.shown + (live.params.speed > 0 ? (i / frames) * morphSetup.loopSeconds : 0)) : (i) => {
         const mc = motionClock(i, fps, live.params);
         const clock = { ...start, shown: start.shown + mc.time, shownScroll: start.shownScroll + mc.scroll, seed: mc.seed, messages: (start.messages ?? 0) + i / fps };
         const stretch = stretchForFrame(live, clock, cache);
