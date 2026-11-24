@@ -11,6 +11,7 @@
 import { BANK_COLS, BANK_ROWS, BANK_TILE_SIZE } from './frameBank.js';
 import { ellipseContour } from './features.js';
 import { MAX_GLITCH_BANDS, glitchBands } from './glitch.js';
+import { GpuTimer } from './gpuTimer.js';
 import { cutHalfPlane } from './layout.js';
 import { MASK_STYLE, MIN_FEATHER_SCALE, PATCH_PAD_IOD } from './maskStyle.js';
 import { mulberry32 } from './prng.js';
@@ -147,6 +148,10 @@ export class CollageRenderer {
     this.bandRects = new Float32Array(MAX_GLITCH_BANDS * 4);
     this.bandShifts = new Float32Array(MAX_GLITCH_BANDS * 2);
 
+    /** True once this frame's source is on the GPU; reset by beginFrame() (no second upload). */
+    this.sourceFresh = false;
+    this.gpuTimer = null; // created by enableGpuTimer() (debug only)
+
     this.initGeometry();
     this.initPrograms();
     this.initResources();
@@ -156,6 +161,8 @@ export class CollageRenderer {
       ev.preventDefault();
       this.lost = true;
       this.hasCollage = false;
+      this.sourceFresh = false;
+      this.gpuTimer?.reset();
       this.contextEvents = { ...this.contextEvents, lost: this.contextEvents.lost + 1 };
       this.onContextChange?.('lost');
     };
@@ -169,6 +176,7 @@ export class CollageRenderer {
       this.births = new Map();
       this.layoutSeed = null;
       this.hasCollage = false;
+      this.gpuTimer?.reattach();
       this.lost = false;
       this.contextEvents = { ...this.contextEvents, restored: this.contextEvents.restored + 1 };
       this.onContextChange?.('restored');
@@ -258,10 +266,39 @@ export class CollageRenderer {
     this.hasCollage = false;
   }
 
+  /** Opens a frame: the next draw uploads the source once, the GPU timer (debug) starts. */
+  beginFrame() {
+    this.sourceFresh = false;
+    this.gpuTimer?.begin();
+  }
+
+  /** Closes the frame opened by beginFrame(). */
+  endFrame() {
+    this.gpuTimer?.end();
+  }
+
+  /** Turns on GPU frame timing (EXT_disjoint_timer_query_webgl2). Returns false when unavailable. */
+  enableGpuTimer() {
+    this.gpuTimer ??= new GpuTimer(this.gl);
+    return this.gpuTimer.available;
+  }
+
+  /** Mean GPU ms of the last finished frames, or 'n/a' (no extension) / null (no result yet). */
+  get gpuMs() {
+    if (!this.gpuTimer) return null;
+    return this.gpuTimer.available ? this.gpuTimer.ms : 'n/a';
+  }
+
+  /** Upload unless this frame already did (§6.3: compose used to re-upload the same frame). */
+  ensureSource(source, mirror) {
+    if (!this.sourceFresh || this.mirror !== Boolean(mirror)) this.uploadSource(source, mirror);
+  }
+
   /** Uploads live video or still image directly to GPU texture (UNPACK_FLIP_Y_WEBGL = true). */
   uploadSource(source, mirror) {
     const { gl } = this;
     this.mirror = Boolean(mirror);
+    this.sourceFresh = true;
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.texVideo);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
@@ -616,7 +653,7 @@ export class CollageRenderer {
   /** Renders low-res blurred camera background (only when alpha < 1 or no collage yet, for privacy). */
   renderBgBlur(source, mirror) {
     const { gl, pCopy } = this;
-    if (!this.hasCollage) this.uploadSource(source, mirror);
+    this.ensureSource(source, mirror);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboBgA.fbo);
     gl.viewport(0, 0, this.fboBgA.w, this.fboBgA.h);
     gl.disable(gl.BLEND);
@@ -633,10 +670,7 @@ export class CollageRenderer {
   compose(source, { alpha, seed, glitch, now, reducedMotion, avoidRows, face = null, mirror = this.mirror, gradeAmt = 1 }) {
     const t0 = performance.now();
     const { gl, pFinal, width: W, height: H } = this;
-    if (alpha < 0.999 || !this.hasCollage) {
-      this.uploadSource(source, mirror);
-      this.renderBgBlur(source, mirror);
-    }
+    if (alpha < 0.999 || !this.hasCollage) this.renderBgBlur(source, mirror);
 
     const bands = glitchBands({
       seed,
@@ -703,6 +737,8 @@ export class CollageRenderer {
       if (f?.fbo) gl.deleteFramebuffer(f.fbo);
       if (f?.tex) gl.deleteTexture(f.tex);
     }
+    this.gpuTimer?.dispose();
+    this.gpuTimer = null;
     gl.deleteTexture(this.texVideo);
     gl.deleteTexture(this.texGrain);
     gl.deleteBuffer(this.polyBuf);

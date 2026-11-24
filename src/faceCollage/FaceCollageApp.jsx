@@ -10,6 +10,8 @@ import './faceCollage.css';
 
 const query = new URLSearchParams(window.location.search);
 const DEBUG = query.get('debug') === '1';
+/** Architecture-r5 §6.1 / P6: a lost GPU context must come back within this, else error screen. */
+const CONTEXT_RESTORE_MS = 3000;
 const INITIAL_SEED = textToSeed(query.get('seed') ?? '') ?? randomSeed();
 const COUNT_KEYS = [
   ['eye', 'Eyes'],
@@ -33,6 +35,9 @@ export default function FaceCollageApp() {
   const trackerRef = useRef(null);
   const streamRef = useRef(null);
   const recRef = useRef(null);
+  const recStoppedByGpuRef = useRef(false);
+  const lostTimerRef = useRef(0);
+  const onContextRef = useRef(null);
   const sessionRef = useRef(0);
   const screenRef = useRef('intro');
   const [screen, setScreen] = useState('intro'); // intro | loading | active | stopped | error
@@ -85,6 +90,8 @@ export default function FaceCollageApp() {
         tracker: trackerRef.current,
         reducedMotion: prefersReducedMotion(),
         onPhase: setPhase,
+        onContext: (kind) => onContextRef.current?.(kind),
+        debug: DEBUG,
       });
     }
     return engineRef.current;
@@ -189,6 +196,22 @@ export default function FaceCollageApp() {
     [ensureEngine, fail, releaseCamera, setScreenSynced],
   );
 
+  // GPU context lost: stop a running clip now; if the context is not back in 3 s, show an error.
+  onContextRef.current = (kind) => {
+    clearTimeout(lostTimerRef.current);
+    if (kind === 'restored') return;
+    if (recRef.current) {
+      recStoppedByGpuRef.current = true;
+      recRef.current.stop();
+    }
+    lostTimerRef.current = setTimeout(() => {
+      if (!engineRef.current?.renderer.lost || screenRef.current !== 'active') return;
+      releaseCamera();
+      setRecording(false);
+      fail('gpu-lost');
+    }, CONTEXT_RESTORE_MS);
+  };
+
   const stopAll = useCallback(() => {
     releaseCamera();
     setErrorKind(null);
@@ -205,6 +228,7 @@ export default function FaceCollageApp() {
       document.removeEventListener('visibilitychange', onHide);
       window.removeEventListener('pagehide', releaseCamera);
       releaseCamera();
+      clearTimeout(lostTimerRef.current);
       engineRef.current?.dispose();
       trackerRef.current?.close();
       trackerRef.current = null;
@@ -274,16 +298,22 @@ export default function FaceCollageApp() {
       recRef.current.stop();
       return;
     }
+    const engine = engineRef.current;
     try {
       const rec = startRecording(canvasRef.current);
       recRef.current = rec;
+      recStoppedByGpuRef.current = false;
+      // The engine hands each finished frame to the clip, paced to an even 30 fps.
+      if (engine) engine.recording = { push: rec.pushFrame, stats: rec.stats };
       setRecording(true);
+      setNotice('');
       const blob = await rec.done;
       download(blob, `face-collage-${seedToText(seed)}.${extensionFor(rec.type)}`);
-      setNotice('Clip saved');
+      setNotice(recStoppedByGpuRef.current ? 'Recording stopped: graphics were reset. Clip saved up to that point.' : 'Clip saved');
     } catch (err) {
       setNotice(err?.message ?? 'Recording failed');
     } finally {
+      if (engine) engine.recording = null;
       recRef.current = null;
       setRecording(false);
     }
@@ -333,7 +363,11 @@ export default function FaceCollageApp() {
             <div className="fc-panel" role="alert" data-error={errorKind}>
               <h2>{copy.title}</h2>
               <p>{copy.body}</p>
-              {copy.retry && <button type="button" className="fc-btn fc-primary" onClick={() => startCamera()}>Try again</button>}
+              {copy.retry && (
+                <button type="button" className="fc-btn fc-primary" onClick={() => (copy.reload ? window.location.reload() : startCamera())}>
+                  Try again
+                </button>
+              )}
               <PhotoButton onFile={startPhoto} />
             </div>
           )}

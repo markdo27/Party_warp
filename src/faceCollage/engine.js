@@ -4,6 +4,7 @@
  * Owns no camera stream itself; the UI opens and stops the stream so the camera light always
  * follows the Stop button.
  */
+import { degradeSettings, initialDegrade, stepDegrade } from './degrade.js';
 import { ExpressionBank } from './frameBank.js';
 import { CollageRenderer } from './renderer.js';
 import { OneEuro, arrayToFrame, frameToArray, measureFace, toPixel, toPixels } from './faceFrame.js';
@@ -12,8 +13,6 @@ import { makeLayout } from './layout.js';
 import { measureTeeth } from './teeth.js';
 import { collageAlpha, initialTracking, stepTracking } from './trackingState.js';
 
-const MAX_OUT_SIDE = 960; // output canvas long side (perf on mid phones)
-const DETECT_WIDTH = 480;
 const SLOW_DETECT_MS = 20; // above this, detect every other frame
 const EYE_BAND_IOD = 0.3;
 const NOSE_BAND_V = [0.22, 0.85];
@@ -25,8 +24,9 @@ const TEETH_MEASURE_MIN_GAP = 0.02;
 const now = () => performance.now();
 const roundExpr = (e) => Object.fromEntries(Object.entries(e).map(([k, v]) => [k, typeof v === 'number' ? Math.round(v * 1000) / 1000 : v]));
 
-function fitSize(w, h) {
-  const k = Math.min(1, MAX_OUT_SIDE / Math.max(w, h));
+/** Output size for a source, long side capped by the current degrade level (960 or 720). */
+function fitSize(w, h, maxSide) {
+  const k = Math.min(1, maxSide / Math.max(w, h));
   return { width: Math.max(2, Math.round((w * k) / 2) * 2), height: Math.max(2, Math.round((h * k) / 2) * 2) };
 }
 
@@ -34,16 +34,28 @@ const sourceSize = (src) =>
   src instanceof HTMLVideoElement ? { w: src.videoWidth, h: src.videoHeight } : { w: src.naturalWidth || src.width, h: src.naturalHeight || src.height };
 
 export class CollageEngine {
-  /** @param {{ canvas: HTMLCanvasElement, tracker: { detect: Function, delegate: string }, reducedMotion?: boolean, onPhase?: (phase: string) => void }} opts */
-  constructor({ canvas, tracker, reducedMotion = false, onPhase }) {
+  /**
+   * @param {{ canvas: HTMLCanvasElement, tracker: { detect: Function, delegate: string }, reducedMotion?: boolean,
+   *   onPhase?: (phase: string) => void, onContext?: (kind: 'lost'|'restored') => void, debug?: boolean }} opts
+   *   `debug` turns on GPU frame timing (snapshot.gpuMs).
+   */
+  constructor({ canvas, tracker, reducedMotion = false, onPhase, onContext, debug = false }) {
     this.canvas = canvas;
     this.tracker = tracker;
     this.reducedMotion = reducedMotion;
     this.onPhase = onPhase;
+    this.onContext = onContext;
     this.renderer = new CollageRenderer(canvas);
+    if (debug) this.renderer.enableGpuTimer();
     this.bank = new ExpressionBank();
     // GPU atlas tiles vanish with a lost context; the CPU index must not keep pointing at them.
-    this.renderer.onContextChange = () => this.bank.clear();
+    this.renderer.onContextChange = (kind) => {
+      this.bank.clear();
+      this.onContext?.(kind);
+    };
+    /** Active clip: { push(t), stats() } from recorder.startRecording, set by the UI. */
+    this.recording = null;
+    this.degrade = initialDegrade();
     // Small detect canvas only (480px); WebGL2 samples source directly with shader mirroring.
     this.detectCanvas = document.createElement('canvas');
     this.dctx = this.detectCanvas.getContext('2d', { willReadFrequently: false });
@@ -61,7 +73,7 @@ export class CollageEngine {
     this.running = false;
     this.face = null;
     this.tracking = initialTracking(now());
-    this.stats = { fps: 0, detectMs: 0, teethMs: 0, renderMs: 0, frames: 0, fpsFrames: 0, fpsAt: now(), skipNext: false };
+    this.stats = { fps: 0, detectMs: 0, teethMs: 0, renderMs: 0, frames: 0, fpsFrames: 0, fpsAt: now(), skipNext: false, detectTick: 0 };
     this.timeline = [];
     this.bands = [];
   }
@@ -113,13 +125,10 @@ export class CollageEngine {
     this.isStill = typeof HTMLImageElement !== 'undefined' && source instanceof HTMLImageElement;
     this.stillFace = null;
     this.mirror = Boolean(mirror);
-    const { w, h } = sourceSize(source);
-    const out = fitSize(w, h);
-    this.outWidth = out.width;
-    this.outHeight = out.height;
-    this.detectCanvas.width = DETECT_WIDTH;
-    this.detectCanvas.height = Math.max(2, Math.round((DETECT_WIDTH * out.height) / out.width));
-    this.renderer.resize(out.width, out.height);
+    // A new source starts at full quality; the ladder only steps down within one session.
+    this.degrade = initialDegrade();
+    this.stats = { ...this.stats, fpsFrames: 0, fpsAt: now(), skipNext: false, detectTick: 0 };
+    this.applySizes();
     this.bank.clear();
     this.renderer.clearBank();
     this.frameFilter.reset();
@@ -130,6 +139,36 @@ export class CollageEngine {
     this.setPhase(this.tracking.phase);
     this.running = true;
     this.raf = requestAnimationFrame(this.tick);
+  }
+
+  /** Output and detect canvas sizes for the current source and degrade level. */
+  applySizes() {
+    const { w, h } = sourceSize(this.source);
+    const { outSide, detectWidth } = degradeSettings(this.degrade);
+    const out = fitSize(w, h, outSide);
+    const resized = out.width !== this.outWidth || out.height !== this.outHeight;
+    this.outWidth = out.width;
+    this.outHeight = out.height;
+    this.detectCanvas.width = detectWidth;
+    this.detectCanvas.height = Math.max(2, Math.round((detectWidth * out.height) / out.width));
+    this.renderer.resize(out.width, out.height);
+    return resized;
+  }
+
+  /** Feeds one finished fps window to the ladder and applies a step (never patch count). */
+  updateDegrade(fps, t) {
+    if (this.isStill) return;
+    const next = stepDegrade(this.degrade, { fps, t, holdOutput: Boolean(this.recording) });
+    if (next === this.degrade) return;
+    const stepped = next.level !== this.degrade.level;
+    this.degrade = next;
+    if (!stepped || !this.source) return;
+    if (this.applySizes()) {
+      // Landmarks live in output pixels; old smoothed values are in the old scale.
+      this.frameFilter.reset();
+      this.featureFilter.reset();
+      this.face = null;
+    }
   }
 
   stop() {
@@ -173,6 +212,9 @@ export class CollageEngine {
   detect(t) {
     if (this.isStill && this.stillFace) return this.stillFace;
     const s = this.stats;
+    const { detectEvery } = degradeSettings(this.degrade);
+    s.detectTick = (s.detectTick + 1) % detectEvery;
+    if (detectEvery > 1 && s.detectTick !== 0) return undefined; // ladder level 1+: every other frame
     if (s.skipNext) {
       s.skipNext = false;
       return undefined; // no new result this frame
@@ -254,6 +296,7 @@ export class CollageEngine {
     const r0 = now();
     const { seed, glitch } = this.params;
     const bankOpts = this.bankOpts();
+    this.renderer.beginFrame();
     if (this.tracking.phase === 'tracking' && this.face) {
       const bankUpdates = this.bank.update(this.face, t, { ...bankOpts, fresh });
       this.renderer.drawCollage(this.source, this.face, this.layout, seed, t, this.reducedMotion, {
@@ -275,7 +318,10 @@ export class CollageEngine {
       mirror: this.mirror,
       gradeAmt: this.gradeAmount(),
     });
+    this.renderer.endFrame();
     this.stats.renderMs = now() - r0;
+    // The clip takes this exact frame, after it is fully drawn (paced to 30 fps by the recorder).
+    this.recording?.push(t);
     this.countFps(t);
   }
 
@@ -309,6 +355,7 @@ export class CollageEngine {
       s.fps = (s.fpsFrames * 1000) / (t - s.fpsAt);
       s.fpsFrames = 0;
       s.fpsAt = t;
+      this.updateDegrade(s.fps, t);
     }
   }
 
@@ -328,6 +375,9 @@ export class CollageEngine {
       contextLost: this.renderer.lost,
       contextEvents: { ...this.renderer.contextEvents },
       renderMs: Math.round(renderMs * 10) / 10,
+      gpuMs: this.renderer.gpuMs,
+      degrade: { level: this.degrade.level, ...degradeSettings(this.degrade), steps: this.degrade.steps.slice() },
+      export: this.recording?.stats() ?? null,
       stages: Object.fromEntries(Object.entries(this.renderer.timings ?? {}).map(([k, v]) => [k, Math.round(v * 10) / 10])),
       frames,
       delegate: this.tracker.delegate,
