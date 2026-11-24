@@ -18,9 +18,9 @@ describe('layout round 3 (ref match)', () => {
     }
   });
 
-  it('eye patches only cut top or bottom, so their sides blend', () => {
+  it('eye patches never cut top or bottom (R5 C1a: no horizontal blinds), only their outward side', () => {
     for (const p of ref.filter((x) => x.kind === 'eye')) {
-      for (const e of p.cut.hard) expect(['top', 'bottom']).toContain(e);
+      for (const e of p.cut.hard) expect(['left', 'right']).toContain(e);
     }
   });
 

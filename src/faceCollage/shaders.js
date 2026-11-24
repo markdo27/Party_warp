@@ -221,10 +221,11 @@ uniform vec2 uBoxWH;    // patch w, h in face units
 uniform float uScale;
 uniform float uRot;     // radians
 uniform float uFlipX;   // 1.0 or -1.0
+uniform float uPad;     // extra margin (face units) so organic feathers are never clipped by the quad
 out vec2 vLocal;        // patch-local unflipped face units (y-down)
 void main() {
   vec2 u = UNIT[gl_VertexID];
-  vLocal = u * uBoxWH;
+  vLocal = u * (uBoxWH + 2.0 * uPad);
   vec2 p = vec2(vLocal.x * uFlipX, vLocal.y) * uScale;
   float c = cos(uRot);
   float s = sin(uRot);
@@ -251,6 +252,7 @@ uniform float uIod;
 uniform vec4 uSrcFeat;     // live feature (u, v, w, h)
 uniform vec4 uTileRect;    // bank tile UV (x0, y0, tw, th)
 uniform vec2 uTexel;       // 1 / source texture W, H
+uniform float uPad;        // quad / bank-tile margin around the feature box (face units)
 uniform vec2 uPoly[16];    // anatomical contour polygon in local face units
 uniform int uPolyCount;
 uniform vec3 uCut;         // selective hard cut plane (nx, ny, dist) in local face units
@@ -283,7 +285,8 @@ float sdPolygon(vec2 p, int n) {
 
 vec2 sampleUv(vec2 localPos) {
   if (uFromBank > 0.5) {
-    vec2 t = vec2(localPos.x / uSrcFeat.z + 0.5, 0.5 - localPos.y / uSrcFeat.w);
+    vec2 tileWH = uSrcFeat.zw + 2.0 * uPad;
+    vec2 t = vec2(localPos.x / tileWH.x + 0.5, 0.5 - localPos.y / tileWH.y);
     t = clamp(t, 0.002, 0.998);
     return uTileRect.xy + t * uTileRect.zw;
   }

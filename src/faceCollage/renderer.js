@@ -12,6 +12,7 @@ import { BANK_COLS, BANK_ROWS, BANK_TILE_SIZE } from './frameBank.js';
 import { ellipseContour } from './features.js';
 import { MAX_GLITCH_BANDS, glitchBands } from './glitch.js';
 import { cutHalfPlane } from './layout.js';
+import { MASK_STYLE, MIN_FEATHER_SCALE, PATCH_PAD_IOD } from './maskStyle.js';
 import { mulberry32 } from './prng.js';
 import { toPixel } from './faceFrame.js';
 import { easeOut } from './trackingState.js';
@@ -42,12 +43,6 @@ const COVER = {
   eye: { w: 1.0, h: 0.82, lift: 0.12 },
   nose: { w: 0.58, top: 0.04, bottom: 0.86 },
   mouth: { grow: 1.18 },
-};
-/** Per-kind organic mask feathering (IOD outside anatomical contour) and micro-sharpening. */
-const MASK_STYLE = {
-  eye: { featherTop: 0.095, featherBot: 0.09, sharpen: 0.38 },
-  nose: { featherTop: 0.075, featherBot: 0.022, sharpen: 0.48 },
-  mouth: { featherTop: 0.055, featherBot: 0.058, sharpen: 0.36 },
 };
 
 function compileShader(gl, type, src) {
@@ -176,7 +171,7 @@ export class CollageRenderer {
     this.pBankCrop = createProgram(gl, FULLSCREEN_VERT, BANK_CROP_FRAG, ['uVideo', 'uMirror', 'uSize', 'uFrame', 'uIod', 'uFeat']);
     this.pPatch = createProgram(gl, PATCH_VERT, PATCH_FRAG, [
       'uSize', 'uFrame', 'uIod', 'uDestUV', 'uBoxWH', 'uScale', 'uRot', 'uFlipX',
-      'uSource', 'uFromBank', 'uMirror', 'uSrcFeat', 'uTileRect', 'uTexel',
+      'uSource', 'uFromBank', 'uMirror', 'uSrcFeat', 'uTileRect', 'uTexel', 'uPad',
       'uPoly', 'uPolyCount', 'uCut', 'uHasCut', 'uFeatherTop', 'uFeatherBot',
       'uGrow', 'uShade', 'uDeepen', 'uSharpen',
     ]);
@@ -495,7 +490,8 @@ export class CollageRenderer {
       const col = c.tileIndex % BANK_COLS;
       const row = Math.floor(c.tileIndex / BANK_COLS);
       gl.viewport(col * BANK_TILE_SIZE, row * BANK_TILE_SIZE, BANK_TILE_SIZE, BANK_TILE_SIZE);
-      gl.uniform4f(pBankCrop.u.uFeat, c.feature.u, c.feature.v, c.feature.w, c.feature.h);
+      // Tiles keep the same pad as the patch quad so the feather never samples a clamped tile edge.
+      gl.uniform4f(pBankCrop.u.uFeat, c.feature.u, c.feature.v, c.feature.w + 2 * PATCH_PAD_IOD, c.feature.h + 2 * PATCH_PAD_IOD);
       this.drawQuad();
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -548,6 +544,7 @@ export class CollageRenderer {
     gl.uniform1i(pPatch.u.uSource, 0);
     gl.uniform2f(pPatch.u.uDestUV, du, dv);
     gl.uniform2f(pPatch.u.uBoxWH, feat.w, feat.h);
+    gl.uniform1f(pPatch.u.uPad, PATCH_PAD_IOD);
     gl.uniform1f(pPatch.u.uScale, s);
     gl.uniform1f(pPatch.u.uRot, (p.rot * Math.PI) / 180);
     gl.uniform1f(pPatch.u.uFlipX, p.flipX ? -1 : 1);
@@ -556,8 +553,8 @@ export class CollageRenderer {
     gl.uniform1i(pPatch.u.uPolyCount, polyN);
     gl.uniform3f(pPatch.u.uCut, plane ? plane[0] : 0, plane ? plane[1] : 1, plane ? plane[2] : 10);
     gl.uniform1f(pPatch.u.uHasCut, hasCut);
-    gl.uniform1f(pPatch.u.uFeatherTop, style.featherTop / Math.max(0.7, s));
-    gl.uniform1f(pPatch.u.uFeatherBot, style.featherBot / Math.max(0.7, s));
+    gl.uniform1f(pPatch.u.uFeatherTop, style.featherTop / Math.max(MIN_FEATHER_SCALE, s));
+    gl.uniform1f(pPatch.u.uFeatherBot, style.featherBot / Math.max(MIN_FEATHER_SCALE, s));
     gl.uniform1f(pPatch.u.uGrow, grow);
     gl.uniform1f(pPatch.u.uShade, p.shade ?? 0);
     gl.uniform1f(pPatch.u.uDeepen, p.deepen ?? 0);

@@ -5,7 +5,8 @@
  * Round 5 architecture:
  *   - Organic landmark-contoured masks (`mask: 'organic-eye' | 'organic-nose' | 'organic-mouth'`)
  *     replace rectangular horizontal planks, eliminating the "venetian blind" artifact (QA R4 R6/R12)
- *     while keeping selective crisp collage cut seams (`cut`).
+ *     The core (|u| < 0.7) is soft like the ref; only outer copies get one outward hard cut (`cut`),
+ *     and the cheek/jaw edge slices keep their hard top/bottom/angled cuts.
  *   - Only the top forehead eye row (`brow: true`) carries the eyebrow arch (matching `image.png`);
  *     lower stacked eyes use tight orbital almond contours so every iris remains unobstructed!
  *   - Semantic expression roles (`expr`) map copies to the Expression Frame Bank (R10) while kept
@@ -53,7 +54,7 @@ export const SLOTS = {
     { u: -0.42, v: 1.04, scale: 0.94, expr: 'mouthClosed' },
     { u: -0.06, v: 1.72, scale: 1.36, expr: 'mouthOpen' },
     { u: -0.72, v: 1.46, scale: 1.3, expr: 'mouthOpen' },
-    { u: 0.58, v: 1.42, scale: 1.24, expr: 'mouthSmile', hardEdge: 'top' },
+    { u: 0.58, v: 1.42, scale: 1.24, expr: 'mouthSmile' },
     { u: 0.42, v: 1.01, scale: 0.88, expr: 'mouthClosed' },
     { u: 0.44, v: 2.16, scale: 1.16, expr: 'mouthOpen' },
   ],
@@ -66,6 +67,17 @@ export const ZONES = {
   mouth: { u: [-0.85, 0.85], v: [0.9, 2.3], scale: [0.88, 1.36], rot: 8 },
   cheek: { u: [-1.45, 1.45], v: [0.3, 1.7], rot: 0 },
 };
+
+/**
+ * Soft core vs hard rim (QA-R5 C1, read from `image.png`): inside |u| < `soft` features blend
+ * into each other with no straight seam; only copies centred at |u| >= `cutFrom` get one hard
+ * cut, on their outward side, so the cut line itself lands at |u| >= `soft`.
+ */
+export const CORE_U = { cutFrom: 0.55, soft: 0.7 };
+/** Draw key for noses: all tiers sit between the upper eyes and the mouths, upper tier on top. */
+// Above every eye band (v <= 0.40) and below every mouth (v >= 0.90): low eyes never cover a nose tier.
+const NOSE_DRAW_KEY = 0.6;
+const NOSE_DRAW_SPREAD = 0.01;
 
 const JITTER = { pos: 0.045, scale: 0.065 };
 /** Upscale cap per kind after jitter (guide ceiling 1.6; 1.4 keeps lips/teeth sharp). */
@@ -98,59 +110,24 @@ export const clampCount = (kind, n) => {
 
 const clamp = (x, [lo, hi]) => Math.min(hi, Math.max(lo, x));
 
+/** No hard cut: the patch only has its organic feathered contour. */
+const NO_CUT = Object.freeze({ kind: 'none', edge: null, angle: 0, signedAngle: 0, chord: 1, hard: Object.freeze([]) });
+
 /**
- * Eye organic patches: 1 selective angled collage cut chord along the outer skin rim
- * (`chord 0.80..0.93`), never cutting into the iris or forming repeating horizontal blinds.
+ * One hard collage cut on the outward side of an outer copy (left for u < 0, right for u > 0),
+ * a near-vertical chord tilted up to 24 deg, so the seam reads like the ref's cheek/jaw cuts
+ * and never as a horizontal plank. Core copies (|u| < CORE_U.cutFrom) stay fully organic.
  */
-export function eyeCut(rand, i, forcedEdge = null) {
-  const edge = forcedEdge ?? (i % 2 ? 'bottom' : 'top');
+export function rimCut(rand, u) {
+  if (Math.abs(u) < CORE_U.cutFrom) return NO_CUT;
   const skew = rand() < HARD_SKEW_SHARE;
   const sign = rand() < 0.5 ? -1 : 1;
   const angle = skew ? range(rand, HARD_SKEW_DEG[0], HARD_SKEW_DEG[1]) : 0;
-  return {
-    kind: skew ? 'skew' : 'rect',
-    edge,
-    angle,
-    signedAngle: sign * angle,
-    chord: range(rand, 0.8, 0.93),
-    hard: [edge],
-  };
+  const edge = u < 0 ? 'left' : 'right';
+  return { kind: skew ? 'skew' : 'rect', edge, angle, signedAngle: sign * angle, chord: range(rand, 0.8, 0.92), hard: [edge] };
 }
 
-export function noseCut(rand) {
-  const skew = rand() < 0.7;
-  const sign = rand() < 0.5 ? -1 : 1;
-  const angle = skew ? range(rand, 4, 14) : 0;
-  return {
-    kind: skew ? 'skew' : 'rect',
-    edge: 'bottom',
-    angle,
-    signedAngle: sign * angle,
-    // Crisp paper-cut seam just below the nostrils so tier 1 reads sharply above tier 2.
-    chord: range(rand, 0.82, 0.92),
-    hard: ['bottom'],
-  };
-}
-
-export function mouthCut(rand, forcedEdge = null) {
-  const r = rand();
-  const edge = forcedEdge ?? (r < 0.36 ? 'left' : r < 0.72 ? 'right' : r < 0.86 ? 'top' : 'bottom');
-  const skew = forcedEdge === 'top' ? rand() < 0.3 : rand() < 0.75;
-  const sign = rand() < 0.5 ? -1 : 1;
-  const angle = skew ? range(rand, HARD_SKEW_DEG[0], HARD_SKEW_DEG[1]) : 0;
-  return {
-    kind: skew ? 'skew' : 'rect',
-    edge,
-    angle,
-    signedAngle: sign * angle,
-    // Stays in the skin rim outside the vermilion lip (including M5's signature ref upper-cheek cut).
-    chord: forcedEdge === 'top' ? range(rand, 0.82, 0.9) : range(rand, 0.85, 0.94),
-    hard: [edge],
-  };
-}
-
-const cutFor = (kind, rand, i, forcedEdge = null) =>
-  kind === 'eye' ? eyeCut(rand, i, forcedEdge) : kind === 'nose' ? noseCut(rand) : kind === 'mouth' ? mouthCut(rand, forcedEdge) : makeCut(rand, EDGES);
+const cutFor = (kind, rand, u) => (kind === 'cheek' ? makeCut(rand, EDGES) : rimCut(rand, u));
 
 export function makeCut(rand, allowed = EDGES) {
   const sides = allowed.filter((e) => e === 'left' || e === 'right');
@@ -178,7 +155,6 @@ function slotOrExtra(kind, i, rand) {
       flipX: null,
       expr: extraExpr,
       brow: false,
-      hardEdge: null,
     };
   }
   return {
@@ -188,7 +164,6 @@ function slotOrExtra(kind, i, rand) {
     flipX: slot.flipX ?? null,
     expr: slot.expr ?? 'live',
     brow: Boolean(slot.brow),
-    hardEdge: slot.hardEdge ?? null,
   };
 }
 
@@ -212,13 +187,20 @@ function placeCopies(kind, seed, total) {
       scale: pos.scale,
       rot: range(attr, -ZONES[kind].rot, ZONES[kind].rot),
       flipX,
-      cut: cutFor(kind, attr, i, pos.hardEdge),
+      cut: cutFor(kind, attr, pos.u),
       shade: kind === 'nose' ? range(attr, -0.045, -0.005) : range(attr, -0.04, 0.04),
       deepen: kind === 'nose' ? NOSE_DEEPEN : 0,
     });
   }
   return out;
 }
+
+/**
+ * Back-to-front key: lower centre drawn later, except noses. All nose tiers go right after the
+ * upper eyes and the upper tier is drawn over the lower one, so its nostrils stay whole and the
+ * lower tier's bridge emerges softly beneath them, as in `image.png` (C5a/C5c).
+ */
+const drawKey = (p) => (p.kind === 'nose' ? NOSE_DRAW_KEY - p.v * NOSE_DRAW_SPREAD : p.v);
 
 /** Edge slices: a hard-cut angled strip of the finished collage at the face edge pushed outwards. */
 function placeSlices(seed, total) {
@@ -273,7 +255,7 @@ export function makeLayout({ seed, counts }) {
     mouth: clampCount('mouth', counts.mouth),
     cheek: clampCount('cheek', counts.cheek ?? 0),
   };
-  const originals = ORIGINALS.map((o, i) => ({
+  const originals = ORIGINALS.map((o) => ({
     ...o,
     id: `orig-${o.source}`,
     mask: MASK_FOR[o.kind],
@@ -283,7 +265,8 @@ export function makeLayout({ seed, counts }) {
     scale: 1,
     rot: 0,
     flipX: false,
-    cut: cutFor(o.kind, mulberry32(hashSeed(seed, 9001 + i)), i),
+    // Kept originals follow the live face and are never cut.
+    cut: NO_CUT,
     shade: 0,
     deepen: 0,
   }));
@@ -291,7 +274,7 @@ export function makeLayout({ seed, counts }) {
   const noses = placeCopies('nose', seed, COUNT_LIMITS.nose.max).slice(0, n.nose);
   const mouths = placeCopies('mouth', seed, COUNT_LIMITS.mouth.max - 1).slice(0, n.mouth - 1);
   const slices = placeSlices(seed, COUNT_LIMITS.cheek.max).slice(0, n.cheek);
-  const body = [...originals, ...eyes, ...noses, ...mouths].sort((a, b) => a.v - b.v || a.id.localeCompare(b.id));
+  const body = [...originals, ...eyes, ...noses, ...mouths].sort((a, b) => drawKey(a) - drawKey(b) || a.id.localeCompare(b.id));
   return [...body, ...slices];
 }
 

@@ -38,8 +38,8 @@ describe('Round 5 architecture (organic masks, selective cuts, frame bank roles)
     expect(Math.max(...mouths.map((m) => m.v))).toBeGreaterThanOrEqual(2.1);
     for (const p of [...eyes, ...noses, ...mouths]) {
       const plane = cutHalfPlane(0.8, 0.6, p.cut);
-      expect(plane).not.toBeNull();
-      expect(Math.hypot(plane[0], plane[1])).toBeCloseTo(1, 5);
+      if (p.cut.hard.length === 0) expect(plane).toBeNull();
+      else expect(Math.hypot(plane[0], plane[1])).toBeCloseTo(1, 5);
     }
   });
 });
