@@ -35,7 +35,7 @@ export class CollageEngine {
     this.onPhase = onPhase;
     this.renderer = new CollageRenderer(canvas);
     this.frameCanvas = document.createElement('canvas');
-    this.fctx = this.frameCanvas.getContext('2d');
+    this.fctx = this.frameCanvas.getContext('2d', { willReadFrequently: true }); // CPU: the renderer layers read it every frame
     this.detectCanvas = document.createElement('canvas');
     this.dctx = this.detectCanvas.getContext('2d', { willReadFrequently: false });
     this.frameFilter = new OneEuro({ minCutoff: 1.2, beta: 0.03 });
@@ -208,6 +208,7 @@ export class CollageEngine {
       fps: Math.round(fps * 10) / 10,
       detectMs: Math.round(detectMs * 10) / 10,
       renderMs: Math.round(renderMs * 10) / 10,
+      stages: Object.fromEntries(Object.entries(this.renderer.timings ?? {}).map(([k, v]) => [k, Math.round(v * 10) / 10])),
       frames,
       delegate: this.tracker.delegate,
       seed: this.params.seed,

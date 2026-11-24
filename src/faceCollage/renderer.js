@@ -21,7 +21,7 @@ const FEATHER_IOD = 0.10;
 const PATCH_FEATHER_IOD = 0.12; // soft patch edges; guide says ~0.05 IOD, 0.12 hides the box sides at phone sizes
 const MAX_SCRATCH_PX = 1024;
 /** Tone grade: lift curve y = (1 - e^(-kx)) / (1 - e^(-k)) per channel, then a contrast stretch around `mid`. */
-const GRADE = { k: [1.6, 1.55, 1.0], mid: 150, contrast: 1.45, u0: 0, v0: 0.65, ru: 1.2, rv: 1.7, feather: 0.18, outside: 0.25 };
+const GRADE = { k: [1.6, 1.55, 1.0], mid: 150, contrast: 1.45, u0: 0, v0: 0.65, ru: 1.2, rv: 1.7, feather: 0.18, outside: 0.25, outFade: 0.3 };
 const EDGE_INDEX = { top: [0, 1], right: [1, 2], bottom: [2, 3], left: [3, 0] };
 const OVAL_INSET = 1.0; // full face oval so forehead/cheeks flatten cleanly while shadowBlur feathers the edge
 const SEAM_PX = 1;
@@ -45,6 +45,7 @@ const make = (w = 1, h = 1) => {
   return c;
 };
 const ctx2d = (c, opts) => c.getContext('2d', opts);
+const CPU = { willReadFrequently: true };
 
 function invert([a, b, c, d, e, f]) {
   const det = a * d - b * c;
@@ -55,6 +56,28 @@ function pathPoly(ctx, pts) {
   ctx.beginPath();
   pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
   ctx.closePath();
+}
+
+/** Pixel bounding box (plus margin) of a w x h face-unit box centred at u, v; clamped to the canvas. */
+function pixelBox(F, u, v, w, h, canvas) {
+  const [a, b, c, d, e, f] = F;
+  const xs = [];
+  const ys = [];
+  for (const [du, dv] of [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]]) {
+    xs.push(a * (u + du) + c * (v + dv) + e);
+    ys.push(b * (u + du) + d * (v + dv) + f);
+  }
+  const x0 = Math.max(0, Math.floor(Math.min(...xs)) - 2);
+  const y0 = Math.max(0, Math.floor(Math.min(...ys)) - 2);
+  const x1 = Math.min(canvas.width, Math.ceil(Math.max(...xs)) + 2);
+  const y1 = Math.min(canvas.height, Math.ceil(Math.max(...ys)) + 2);
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+/** Draws only the needed part of `img` (same size as the collage) at its own pixel position. */
+function drawRegion(ctx, img, box) {
+  if (box.w < 1 || box.h < 1) return;
+  ctx.drawImage(img, box.x, box.y, box.w, box.h, box.x, box.y, box.w, box.h);
 }
 
 function makeGrain() {
@@ -77,12 +100,14 @@ export class CollageRenderer {
   constructor(outCanvas) {
     this.out = outCanvas;
     this.octx = ctx2d(outCanvas, { willReadFrequently: true });
+    // CPU-backed layers: grade() reads pixels every frame, and a GPU readback stalled the
+    // pipeline (QA R3 F1). Patch work is small sub-rects, so CPU raster is cheaper overall.
     this.collage = make();
-    this.cctx = ctx2d(this.collage);
+    this.cctx = ctx2d(this.collage, CPU);
     this.plate = make();
-    this.pctx = ctx2d(this.plate);
+    this.pctx = ctx2d(this.plate, CPU);
     this.mask = make();
-    this.mctx = ctx2d(this.mask);
+    this.mctx = ctx2d(this.mask, CPU);
     this.small = make(PLATE_GRID, PLATE_GRID);
     this.sctx = ctx2d(this.small, { willReadFrequently: true });
     this.tiny = make(PLATE_BLUR_GRID, PLATE_BLUR_GRID);
@@ -116,9 +141,11 @@ export class CollageRenderer {
     const { width: W, height: H } = this.collage;
     cctx.setTransform(1, 0, 0, 1, 0, 0);
     cctx.globalAlpha = 1;
+    const t0 = performance.now();
     cctx.drawImage(source, 0, 0, W, H);
     this.drawPlate(source, face);
     cctx.drawImage(this.plate, 0, 0);
+    const t1 = performance.now();
     this.trackBirths(layout, seed, now, reducedMotion);
     const F = frameMatrix(face.frame);
     const Finv = invert(F);
@@ -127,7 +154,9 @@ export class CollageRenderer {
       else this.drawPatch(source, face, p, F, Finv, now);
     }
     cctx.setTransform(1, 0, 0, 1, 0, 0);
+    const t2 = performance.now();
     this.grade(face);
+    this.timings = { plateMs: t1 - t0, patchMs: t2 - t1, gradeMs: performance.now() - t2 };
     cctx.globalAlpha = 1;
     this.hasCollage = true;
   }
@@ -159,10 +188,11 @@ export class CollageRenderer {
     x.save();
     x.translate(-f.u, -f.v);
     x.transform(...Finv);
-    x.drawImage(source, 0, 0, this.collage.width, this.collage.height);
+    drawRegion(x, source, pixelBox(F, f.u, f.v, f.w, f.h, this.collage));
     x.restore();
     this.shadeScratch(x, f.w, f.h, p.shade);
     x.restore();
+    if (p.deepen) this.deepenScratch(sw, sh, p.deepen);
     this.finishEdges(x, f.w, f.h, pts, p.cut, PATCH_FEATHER_IOD / s, (SEAM_PX * 2) / kx);
     cctx.save();
     cctx.globalAlpha = grow;
@@ -186,7 +216,7 @@ export class CollageRenderer {
     x.save();
     x.translate(-p.srcU, -p.v);
     x.transform(...Finv);
-    x.drawImage(this.collage, 0, 0);
+    drawRegion(x, this.collage, pixelBox(F, p.srcU, p.v, w, h, this.collage));
     x.restore();
     this.shadeScratch(x, w, h, p.shade);
     this.finishEdges(x, w, h, pts, p.cut, PATCH_FEATHER_IOD, (SEAM_PX * 2) / kx);
@@ -200,14 +230,20 @@ export class CollageRenderer {
 
   /** Patch-local scratch canvas at `k` px per face unit, local origin at its centre. */
   scratchFor(w, h, k) {
+    // Resizing a canvas reallocates it (~1 ms per patch, QA R3 F1): only grow, in 64 px steps.
     if (!this.scratch) {
-      this.scratch = make();
-      this.xctx = ctx2d(this.scratch);
+      this.scratch = make(64, 64);
+      this.xctx = ctx2d(this.scratch, CPU);
     }
     const sw = Math.max(2, Math.min(MAX_SCRATCH_PX, Math.ceil(w * k)));
     const sh = Math.max(2, Math.min(MAX_SCRATCH_PX, Math.ceil(h * k)));
-    this.scratch.width = sw; // resizing also clears
-    this.scratch.height = sh;
+    const step = (n) => Math.min(MAX_SCRATCH_PX, Math.ceil(n / 64) * 64);
+    if (this.scratch.width < sw || this.scratch.height < sh) {
+      this.scratch.width = Math.max(this.scratch.width, step(sw));
+      this.scratch.height = Math.max(this.scratch.height, step(sh));
+    }
+    this.xctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.xctx.clearRect(0, 0, sw + 1, sh + 1);
     const kx = sw / w;
     this.xctx.setTransform(kx, 0, 0, sh / h, sw / 2, sh / 2);
     return { x: this.xctx, sw, sh, kx };
@@ -220,6 +256,23 @@ export class CollageRenderer {
     x.globalCompositeOperation = 'source-atop';
     x.fillStyle = shade > 0 ? `rgba(255,255,255,${shade.toFixed(3)})` : `rgba(0,0,0,${(-shade).toFixed(3)})`;
     x.fillRect(-w, -h, w * 2, h * 2);
+    x.restore();
+  }
+
+  /** Multiplies the patch with itself: darks (nostrils, tip shadow) deepen more than highlights. */
+  deepenScratch(sw, sh, amount) {
+    const x = this.xctx;
+    // Self-multiply, then screen the same amount of white back: mid skin returns close to its
+    // level (no darker box), while nostrils and tip shadow keep most of the deepening.
+    x.save();
+    x.setTransform(1, 0, 0, 1, 0, 0);
+    x.globalCompositeOperation = 'multiply';
+    x.globalAlpha = amount;
+    x.drawImage(this.scratch, 0, 0, sw, sh, 0, 0, sw, sh);
+    x.globalCompositeOperation = 'source-atop';
+    x.globalAlpha = amount * 0.35;
+    x.fillStyle = '#fff';
+    x.fillRect(0, 0, sw, sh);
     x.restore();
   }
 
@@ -270,7 +323,9 @@ export class CollageRenderer {
     const { frame } = face;
     const { width: W, height: H } = this.collage;
     const c = toPixel(frame, { u: GRADE.u0, v: GRADE.v0 });
-    const r = Math.max(GRADE.ru, GRADE.rv) * (1 + GRADE.feather) * frame.iod;
+    // The outside lift fades to 0 by q = 1 + feather + outFade, which lies inside the box: no rectangle edge (QA R3 R7).
+    const r = Math.max(GRADE.ru, GRADE.rv) * (1 + GRADE.feather + GRADE.outFade) * frame.iod;
+    const qEnd = 1 + GRADE.feather + GRADE.outFade;
     const x0 = Math.max(0, Math.floor(c.x - r));
     const y0 = Math.max(0, Math.floor(c.y - r));
     const x1 = Math.min(W, Math.ceil(c.x + r));
@@ -288,8 +343,10 @@ export class CollageRenderer {
         const du = ((px * frame.ax + py * frame.ay) * inv - GRADE.u0) / GRADE.ru;
         const dv = ((-px * frame.ay + py * frame.ax) * inv - GRADE.v0) / GRADE.rv;
         const q = Math.sqrt(du * du + dv * dv);
+        if (q >= qEnd) continue;
         const inside = q <= 1 ? 1 : q >= 1 + GRADE.feather ? 0 : 1 - (q - 1) / GRADE.feather;
-        const m = GRADE.outside + (1 - GRADE.outside) * inside;
+        const out = q <= 1 + GRADE.feather ? 1 : (qEnd - q) / GRADE.outFade;
+        const m = GRADE.outside * out + (1 - GRADE.outside) * inside;
         const o = ((yy - y0) * iw + (xx - x0)) * 4;
         const r0 = lr[d[o]];
         const g0 = lg[d[o + 1]];

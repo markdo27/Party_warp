@@ -5,7 +5,6 @@
   --fc-muted: color-mix(in srgb, var(--fc-ink) 68%, var(--fc-paper));
   --fc-line: color-mix(in srgb, var(--fc-ink) 18%, var(--fc-paper));
   --fc-line-strong: color-mix(in srgb, var(--fc-ink) 50%, var(--fc-paper));
-  --fc-rec: #c8102e;
   --fc-head-h: 52px;
   --fc-actions-h: 72px;
   --fc-hover: color-mix(in srgb, var(--fc-ink) 8%, var(--fc-paper));
@@ -63,7 +62,7 @@ body { background: var(--fc-paper); color: var(--fc-ink); font-family: var(--fc-
 .fc-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--fc-space-2); }
 .fc-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--fc-space-2); }
 .fc-actions .fc-btn { padding: 0 var(--fc-space-2); gap: var(--fc-space-2); }
-.fc-rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--fc-rec); flex: none; }
+.fc-rec-dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; flex: none; }
 .fc-sr { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 /* Mobile: the camera actions stay reachable under the preview (UX U1). */
 @media (max-width: 899px) {

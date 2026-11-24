@@ -28,7 +28,7 @@ export const FACE_OVAL = [
 /** Crop sizes in IOD (inter-ocular distance), from the visual spec B3. */
 export const CROP = {
   eye: { w: 0.8, h: 0.55, lift: 0.08 },
-  nose: { w: 0.6, h: 0.55 },
+  nose: { w: 0.72, h: 0.66 }, // R4: wide enough for both nostrils and the whole tip (QA R3)
   mouth: { widthFactor: 1.35, minH: 0.5, heightFactor: 1.4 },
   cheek: { w: 0.78, h: 0.48 },
 };

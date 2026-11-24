@@ -16,7 +16,8 @@ const SHIFT = [4, 24];
 const SPLIT = [1, 3];
 const EYE_COVER_LIMIT = 0.3;
 /** Face-relative sizes (ref-match guide section 6), used when the face is known. */
-const FACE_BAND = { h: [0.02, 0.08], shift: [0.07, 0.25], sideShare: 0.75, edgeU: 0.7, reach: [0.5, 1.6] };
+// R4: bands were 0.2-1.4% of the frame, the ref is far denser (QA R3 R11); aim for about 3-6% at glitch 0.6.
+const FACE_BAND = { h: [0.05, 0.18], shift: [0.07, 0.25], sideShare: 0.8, edgeU: 0.7, reach: [0.7, 2.0], count: [6, 14], split: [2, 5] };
 
 export const slotAt = (timeMs) => Math.floor(timeMs / SLOT_MS);
 
@@ -36,7 +37,8 @@ export function glitchBands({ seed, timeMs, intensity, height, width = 0, face =
   const W = width > 0 ? width : Infinity;
   const useFace = Boolean(face && face.iod > 1 && width > 0);
   const rand = mulberry32(hashSeed(seed, slotAt(timeMs)));
-  const count = Math.round(range(rand, BANDS[0], BANDS[0] + (BANDS[1] - BANDS[0]) * k));
+  const [c0, c1] = useFace ? FACE_BAND.count : BANDS;
+  const count = Math.round(range(rand, c0, c0 + (c1 - c0) * k));
   const bands = [];
   let area = 0;
   for (let i = 0; i < count; i += 1) {
@@ -46,7 +48,7 @@ export function glitchBands({ seed, timeMs, intensity, height, width = 0, face =
     const dir = rand() < 0.5 ? -1 : 1;
     const mag = useFace ? range(rand, FACE_BAND.shift[0], FACE_BAND.shift[1]) * face.iod : range(rand, SHIFT[0], SHIFT[1]) * px;
     const shift = Math.round(dir * mag * k) || dir;
-    const split = Math.max(1, Math.round(range(rand, SPLIT[0], SPLIT[1]) * px));
+    const split = Math.max(1, Math.round(useFace ? range(rand, FACE_BAND.split[0], FACE_BAND.split[1]) * px * 1.5 : range(rand, SPLIT[0], SPLIT[1]) * px));
     let x0 = 0;
     let x1 = W;
     const side = useFace && rand() < FACE_BAND.sideShare;

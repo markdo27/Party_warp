@@ -26,14 +26,14 @@ export const PRESETS = {
 /** Slot table from the reference, in the order copies are added (removed in reverse). */
 export const SLOTS = {
   eye: [
-    { u: -0.43, v: -0.72, scale: 0.95 },
-    { u: 0.41, v: -0.74, scale: 0.95 },
-    { u: -0.69, v: -0.47, scale: 1.0 },
-    { u: 0.01, v: -0.49, scale: 1.05 },
-    { u: 0.65, v: -0.42, scale: 1.0 },
-    { u: -0.02, v: -0.2, scale: 1.0 },
-    { u: -0.71, v: 0.21, scale: 0.95, flipX: true },
-    { u: 0.67, v: 0.27, scale: 0.95, flipX: true },
+    { u: -0.43, v: -0.72, scale: 1.12 },
+    { u: 0.41, v: -0.74, scale: 1.12 },
+    { u: -0.69, v: -0.47, scale: 1.18 },
+    { u: 0.01, v: -0.49, scale: 1.24 },
+    { u: 0.65, v: -0.42, scale: 1.18 },
+    { u: -0.02, v: -0.2, scale: 1.18 },
+    { u: -0.71, v: 0.21, scale: 1.12, flipX: true },
+    { u: 0.67, v: 0.27, scale: 1.12, flipX: true },
   ],
   nose: [
     { u: -0.35, v: 0.36, scale: 1.15 },
@@ -42,30 +42,32 @@ export const SLOTS = {
     { u: 0.2, v: 0.66, scale: 1.2 },
   ],
   mouth: [
-    { u: -0.45, v: 1.09, scale: 0.9 },
-    { u: -0.07, v: 1.74, scale: 1.6 },
-    { u: -0.8, v: 1.46, scale: 1.5 },
-    { u: 0.62, v: 1.46, scale: 1.3 },
-    { u: 0.43, v: 1.03, scale: 0.8 },
-    { u: 0.47, v: 2.17, scale: 1.2 },
+    { u: -0.45, v: 1.09, scale: 0.95 },
+    { u: -0.07, v: 1.74, scale: 1.35 },
+    { u: -0.8, v: 1.46, scale: 1.3 },
+    { u: 0.62, v: 1.46, scale: 1.2 },
+    { u: 0.43, v: 1.03, scale: 0.9 },
+    { u: 0.47, v: 2.17, scale: 1.15 },
   ],
 };
 
 /** Zones: slots and extra copies (beyond the table) keep their centre inside. */
 export const ZONES = {
-  eye: { u: [-0.85, 0.85], v: [-0.9, 0.45], scale: [0.9, 1.05], rot: 6 },
+  eye: { u: [-0.85, 0.85], v: [-0.9, 0.45], scale: [1.1, 1.25], rot: 6 },
   nose: { u: [-0.55, 0.55], v: [0.25, 0.85], scale: [1.05, 1.2], rot: 6 },
-  mouth: { u: [-0.9, 0.9], v: [0.9, 2.3], scale: [0.9, 1.5], rot: 8 },
+  mouth: { u: [-0.9, 0.9], v: [0.9, 2.3], scale: [0.9, 1.3], rot: 8 },
   cheek: { u: [-1.45, 1.45], v: [0.3, 1.7], rot: 0 },
 };
 
 const JITTER = { pos: 0.06, scale: 0.08 };
+/** Upscale cap per kind after jitter: a 1.6x+ mouth from a small source went blurry (QA R3, guide max 1.6). */
+const MAX_SCALE = { eye: 1.3, nose: 1.3, mouth: 1.4 };
 const SALT = { eye: 11, nose: 23, mouth: 37, cheek: 53 };
 const EDGES = ['top', 'right', 'bottom', 'left'];
-const EYE_EDGES = ['top', 'bottom'];
 const HARD_SKEW_DEG = [5, 20];
 const HARD_SKEW_SHARE = 0.45;
 const FLIP_SHARE = 0.25;
+const NOSE_DEEPEN = 0.25;
 /** Edge slices (guide section 5). */
 const SLICE = { h: [0.08, 0.35], shift: [0.1, 0.3], src: [0.72, 0.95], v: [0.3, 1.7], len: [0.35, 0.6] };
 /** Heavy side gets about 2/3 of the slices: H H L H L H. */
@@ -91,6 +93,27 @@ const clamp = (x, [lo, hi]) => Math.min(hi, Math.max(lo, x));
  * 70% of first hard edges are top/bottom; the first hard edge may be slanted.
  * Eye copies only cut top/bottom so their sides melt into the copies next to them.
  */
+/**
+ * Eye copies: exactly one hard edge, alternating top / bottom by index, so stacked eyes do not
+ * read as repeated horizontal stripes (QA R3 R6). Mouths: one hard edge, mostly a slanted side
+ * cut, so neighbouring mouths blend into a wave instead of slats.
+ */
+export function eyeCut(rand, i) {
+  const edge = i % 2 ? 'bottom' : 'top';
+  const skew = rand() < HARD_SKEW_SHARE;
+  return { kind: skew ? 'skew' : 'rect', edge, angle: skew ? range(rand, HARD_SKEW_DEG[0], HARD_SKEW_DEG[1]) : 0, hard: [edge] };
+}
+
+export function mouthCut(rand) {
+  const r = rand();
+  const edge = r < 0.35 ? 'left' : r < 0.7 ? 'right' : r < 0.85 ? 'top' : 'bottom';
+  const skew = rand() < 0.6;
+  return { kind: skew ? 'skew' : 'rect', edge, angle: skew ? range(rand, HARD_SKEW_DEG[0], HARD_SKEW_DEG[1]) : 0, hard: [edge] };
+}
+
+// Noses: one slanted top/bottom cut so the two tiers read as stacked noses, not boxes.
+const cutFor = (kind, rand, i) => (kind === 'eye' || kind === 'nose' ? eyeCut(rand, i) : kind === 'mouth' ? mouthCut(rand) : makeCut(rand, EDGES));
+
 export function makeCut(rand, allowed = EDGES) {
   const sides = allowed.filter((e) => e === 'left' || e === 'right');
   const vertical = rand() < 0.7 || sides.length === 0;
@@ -113,7 +136,7 @@ function slotOrExtra(kind, i, rand) {
   return {
     u: clamp(slot.u + range(rand, -JITTER.pos, JITTER.pos), z.u),
     v: clamp(slot.v + range(rand, -JITTER.pos, JITTER.pos), z.v),
-    scale: slot.scale * (1 + range(rand, -JITTER.scale, JITTER.scale)),
+    scale: Math.min(MAX_SCALE[kind] ?? Infinity, slot.scale * (1 + range(rand, -JITTER.scale, JITTER.scale))),
     flipX: slot.flipX ?? null,
   };
 }
@@ -135,8 +158,10 @@ function placeCopies(kind, seed, total) {
       scale: pos.scale,
       rot: range(attr, -ZONES[kind].rot, ZONES[kind].rot),
       flipX,
-      cut: makeCut(attr, kind === 'eye' ? EYE_EDGES : EDGES),
-      shade: range(attr, -0.05, 0.05),
+      cut: cutFor(kind, attr, i),
+      shade: kind === 'nose' ? range(attr, -0.04, 0) : range(attr, -0.05, 0.05),
+      // Noses read too pale against the lifted skin (QA R3): deepen nostrils and tip shadow.
+      deepen: kind === 'nose' ? NOSE_DEEPEN : 0,
     });
   }
   return out;
@@ -192,7 +217,7 @@ export function makeLayout({ seed, counts }) {
     scale: 1,
     rot: 0,
     flipX: false,
-    cut: makeCut(mulberry32(hashSeed(seed, 9001 + i)), o.kind === 'eye' ? EYE_EDGES : EDGES),
+    cut: cutFor(o.kind, mulberry32(hashSeed(seed, 9001 + i)), i),
     shade: 0,
   }));
   // Full max-length lists sliced to the count, so changing a count never moves the others.
