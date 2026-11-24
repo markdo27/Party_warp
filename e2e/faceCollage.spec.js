@@ -214,3 +214,41 @@ test('mobile 360px: camera actions stay on screen, sliders have one name each', 
   await expect(page.getByRole('heading', { name: 'Camera off' })).toBeVisible();
   await ctx.close();
 });
+
+test('broken photo on fresh page shows photo-error, does not open camera, and recovers with valid photo (UI-F1 / P3b)', async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto(URL_);
+  await page.getByTestId('fc-photo').first().setInputFiles({
+    name: 'bad.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from('not-a-valid-image'),
+  });
+  await expect(page.locator('[data-error="photo-error"]')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Could not read that photo' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Try again' })).toHaveCount(0);
+  expect(await page.evaluate(() => window.__faceCollage?.trackStates() ?? [])).toEqual([]);
+  await page.getByTestId('fc-photo').first().setInputFiles(FACE);
+  await waitPhase(page, 'tracking', 60_000);
+  expect((await ui(page)).mode).toBe('photo');
+});
+
+test('mobile landscape 568x320: canvas stays clear of fixed action bar and bank status is visible (UI-F2 / UI-F3)', async ({ browser }) => {
+  test.setTimeout(90_000);
+  const ctx = await browser.newContext({ viewport: { width: 568, height: 320 }, isMobile: true, hasTouch: true });
+  const page = await ctx.newPage();
+  await page.goto(URL_);
+  await page.getByRole('button', { name: 'Start camera' }).click();
+  await waitPhase(page, 'tracking', 60_000);
+  const bar = page.getByRole('toolbar', { name: 'Camera actions' });
+  const canvasBox = await page.getByTestId('fc-canvas').boundingBox();
+  const barBox = await bar.boundingBox();
+  expect(canvasBox.y + canvasBox.height).toBeLessThanOrEqual(barBox.y + 0.5);
+  for (const b of await bar.getByRole('button').all()) expect((await b.boundingBox()).height).toBeGreaterThanOrEqual(44);
+  await page.getByLabel('Preset').selectOption('ref');
+  await expect(page.getByTestId('fc-bank-status')).toBeVisible();
+  await expect(page.getByTestId('fc-bank-status')).toContainText('/8');
+  await bar.getByRole('button', { name: 'Stop camera' }).click();
+  await expect(page.getByRole('heading', { name: 'Camera off' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Start again' })).toBeFocused();
+  await ctx.close();
+});

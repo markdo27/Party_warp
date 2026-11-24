@@ -35,9 +35,9 @@ export const FACE_OVAL = [
 /** Crop sizes in IOD (inter-ocular distance), tightly enclosing each organic contour + slim feather. */
 export const CROP = {
   eye: { w: 0.72, h: 0.44, lift: 0.015 },
-  eyeBrow: { w: 0.82, h: 0.62, lift: 0.09 },
-  nose: { w: 0.58, h: 0.44 },
-  mouth: { widthFactor: 1.48, minH: 0.56, heightFactor: 1.56 },
+  eyeBrow: { w: 0.78, h: 0.56, lift: 0.075 },
+  nose: { w: 0.58, h: 0.5 },
+  mouth: { widthFactor: 1.32, minH: 0.48, heightFactor: 1.32 },
   cheek: { w: 0.78, h: 0.48 },
 };
 
@@ -200,12 +200,12 @@ export function measureContours(lm, toFace, features) {
   const browA = swapped ? [...EYE_B, ...BROW_B] : [...EYE_A, ...BROW_A];
   const browB = swapped ? [...EYE_A, ...BROW_A] : [...EYE_B, ...BROW_B];
   return {
-    eyeA: buildContour(lm, orbitalA, toFace, features.eyeA, { padX: 0.085, padTop: 0.08, padBot: 0.065 }, features.eyeA.w, features.eyeA.h, 0.26, 0.14),
-    eyeB: buildContour(lm, orbitalB, toFace, features.eyeB, { padX: 0.085, padTop: 0.08, padBot: 0.065 }, features.eyeB.w, features.eyeB.h, 0.26, 0.14),
-    eyeBrowA: buildContour(lm, browA, toFace, features.eyeBrowA, { padX: 0.065, padTop: 0.035, padBot: 0.065 }, features.eyeBrowA.w, features.eyeBrowA.h, 0.28, 0.2),
-    eyeBrowB: buildContour(lm, browB, toFace, features.eyeBrowB, { padX: 0.065, padTop: 0.035, padBot: 0.065 }, features.eyeBrowB.w, features.eyeBrowB.h, 0.28, 0.2),
-    nose: buildContour(lm, NOSE_CONTOUR_INDICES, toFace, features.nose, { padX: 0.055, padTop: 0.04, padBot: 0.035 }, features.nose.w, features.nose.h, 0.2, 0.16),
-    mouth: buildContour(lm, LIPS_OUTER, toFace, features.mouth, { padX: 0.065, padTop: 0.055, padBot: 0.07 }, features.mouth.w, features.mouth.h, 0.34, 0.18),
+    eyeA: buildContour(lm, orbitalA, toFace, features.eyeA, { padX: 0.058, padTop: 0.058, padBot: 0.048 }, features.eyeA.w, features.eyeA.h, 0.26, 0.14),
+    eyeB: buildContour(lm, orbitalB, toFace, features.eyeB, { padX: 0.058, padTop: 0.058, padBot: 0.048 }, features.eyeB.w, features.eyeB.h, 0.26, 0.14),
+    eyeBrowA: buildContour(lm, browA, toFace, features.eyeBrowA, { padX: 0.045, padTop: 0.022, padBot: 0.048 }, features.eyeBrowA.w, features.eyeBrowA.h, 0.28, 0.19),
+    eyeBrowB: buildContour(lm, browB, toFace, features.eyeBrowB, { padX: 0.045, padTop: 0.022, padBot: 0.048 }, features.eyeBrowB.w, features.eyeBrowB.h, 0.28, 0.19),
+    nose: buildContour(lm, NOSE_CONTOUR_INDICES, toFace, features.nose, { padX: 0.048, padTop: 0.035, padBot: 0.028 }, features.nose.w, features.nose.h, 0.2, 0.16),
+    mouth: buildContour(lm, LIPS_OUTER, toFace, features.mouth, { padX: 0.028, padTop: 0.022, padBot: 0.03 }, features.mouth.w, features.mouth.h, 0.32, 0.16),
   };
 }
 

@@ -104,6 +104,13 @@ export class ExpressionBank {
     return Boolean(entry && now - entry.capturedAt <= this.ttlMs);
   }
 
+  /** Zero-allocation fresh slot count for lightweight UI status updates. */
+  activeCountAt(now) {
+    let n = 0;
+    for (const key of BANK_SLOTS) if (this.isFresh(this.slots[key], now)) n += 1;
+    return n;
+  }
+
   thresholds() {
     const ready = this.earBaselineN >= BASELINE_MIN_SAMPLES;
     return {

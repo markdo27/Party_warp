@@ -59,6 +59,8 @@ body { background: var(--fc-paper); color: var(--fc-ink); font-family: var(--fc-
 .fc-field input[type='range'] { width: 100%; height: var(--fc-tap); accent-color: var(--fc-ink); }
 .fc-check { display: flex; align-items: center; gap: var(--fc-space-2); min-height: var(--fc-tap); font-size: 0.875rem; cursor: pointer; }
 .fc-check input[type='checkbox'] { width: 20px; height: 20px; margin: 0; accent-color: var(--fc-ink); cursor: pointer; }
+.fc-bank-group { display: grid; gap: var(--fc-space-1); }
+.fc-bank-status { margin: 0; padding-left: calc(20px + var(--fc-space-2)); }
 .fc-field select, .fc-seed { min-height: var(--fc-tap); padding: 0 var(--fc-space-3); border: 1px solid var(--fc-line-strong); border-radius: var(--fc-radius); background: var(--fc-paper); color: var(--fc-ink); font: inherit; }
 .fc-seed { width: 100%; font-family: ui-monospace, monospace; text-transform: lowercase; }
 .fc-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--fc-space-2); }
@@ -66,17 +68,23 @@ body { background: var(--fc-paper); color: var(--fc-ink); font-family: var(--fc-
 .fc-actions .fc-btn { padding: 0 var(--fc-space-2); gap: var(--fc-space-2); }
 .fc-rec-dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; flex: none; }
 .fc-sr { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-/* Mobile: the camera actions stay reachable under the preview (UX U1). */
+/* Mobile: the camera actions stay reachable under the preview (UX U1) without overlapping short landscape viewports like 568x320 (QA R5 UI-F2). */
 @media (max-width: 899px) {
-  .fc-canvas { max-height: calc(100svh - var(--fc-tap) - var(--fc-actions-h) - var(--fc-head-h)); }
+  .fc-stage { min-height: min(240px, max(120px, calc(100svh - var(--fc-head-h) - var(--fc-actions-h) - 2rem))); }
+  .fc-canvas { max-height: calc(100svh - var(--fc-head-h) - var(--fc-actions-h) - 2rem); }
   .fc { padding-bottom: calc(var(--fc-actions-h) + env(safe-area-inset-bottom)); }
   .fc-actions { position: fixed; left: 0; right: 0; bottom: 0; z-index: 2; padding: var(--fc-space-3) var(--fc-space-4) calc(var(--fc-space-3) + env(safe-area-inset-bottom)); background: var(--fc-paper); border-top: 1px solid var(--fc-line-strong); }
+}
+@media (max-width: 899px) and (max-height: 400px) {
+  .fc-main { padding: var(--fc-space-2) var(--fc-space-4); }
+  .fc-stage { min-height: max(120px, calc(100svh - var(--fc-head-h) - var(--fc-actions-h) - 1rem)); }
+  .fc-canvas { max-height: calc(100svh - var(--fc-head-h) - var(--fc-actions-h) - 1rem); }
 }
 
 .fc-btn { min-height: var(--fc-tap); padding: 0 var(--fc-space-4); border: 1px solid var(--fc-ink); border-radius: var(--fc-radius); background: var(--fc-paper); color: var(--fc-ink); font: inherit; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; transition: background-color 120ms, transform 120ms; }
 .fc-btn:hover:not(:disabled) { background: var(--fc-hover); }
 .fc-btn:active:not(:disabled) { transform: translateY(1px); }
-.fc-btn:focus-visible, .fc-field input:focus-visible, .fc-field select:focus-visible, .fc-seed:focus-visible { outline: 3px solid var(--fc-ink); outline-offset: 2px; }
+.fc-btn:focus-visible, .fc-field input:focus-visible, .fc-field select:focus-visible, .fc-seed:focus-visible, .fc-check input:focus-visible { outline: 3px solid var(--fc-ink); outline-offset: 2px; }
 .fc-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .fc-btn[aria-pressed='true'] { background: var(--fc-ink); border-color: var(--fc-ink); color: var(--fc-paper); }
 .fc-primary { background: var(--fc-ink); color: var(--fc-paper); }

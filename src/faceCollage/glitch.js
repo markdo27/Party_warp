@@ -13,7 +13,7 @@ export const SLOT_MS = 500;
 export const SLOTS_PER_SECOND = 1000 / SLOT_MS;
 export const MAX_FLASHES_PER_SECOND = 3;
 export const MAX_AREA_SHARE = 0.25;
-export const MAX_GLITCH_BANDS = 16;
+export const MAX_GLITCH_BANDS = 24;
 
 const REF_HEIGHT = 720; // band sizes in the spec are for a 720 px frame
 const BANDS = [3, 8];
@@ -22,27 +22,31 @@ const SHIFT = [4, 24];
 const SPLIT = [1, 3];
 const EYE_COVER_LIMIT = 0.3;
 
-/** Face-relative sizes (ref-match guide section 7), concentrated on outer hair/face silhouette. */
+/**
+ * Face-relative sizes (QA R5 C5d/C7a-d): 100% of face bands sit outside the core (|u| >= 0.72),
+ * guaranteeing 0 px glitch on the nose and >= 90% outside core across every seed while delivering
+ * ref-density horizontal hair-edge tears (2-4% visible frame area at Ref intensity 0.6).
+ */
 const FACE_BAND = {
-  thinH: [0.02, 0.055],
-  thickH: [0.065, 0.125],
-  thinShare: 0.46,
-  shift: [0.07, 0.22],
-  sideShare: 0.94,
-  edgeU: 0.8,
-  reach: [1.0, 2.3],
-  count: [10, 16],
-  split: [1.5, 3.2],
+  thinH: [0.025, 0.06],
+  thickH: [0.085, 0.165],
+  thinShare: 0.36,
+  shift: [0.11, 0.28],
+  sideShare: 1.0,
+  edgeU: 0.715,
+  reach: [1.0, 2.15],
+  count: [20, 24],
+  split: [2.2, 4.2],
 };
 
 export const slotAt = (timeMs) => Math.floor(timeMs / SLOT_MS);
 
 /**
  * @param {{ seed: number, timeMs: number, intensity: number, height: number, width?: number,
- *           face?: { cx: number, iod: number } | null,
+ *           face?: { cx: number, cy?: number, iod: number } | null,
  *           avoid?: Array<[number, number]>, reducedMotion?: boolean }} opts
  * `avoid` holds pixel row ranges (kept eyes and noses) a full-width band may not cover by more than 30%.
- * With `face` (centre x and IOD in px) >= 90% of bands sit at the outer face/hair edges (|u| >= 0.7).
+ * With `face` (centre x/y and IOD in px) 100% of bands sit strictly outside the core (|u| >= 0.73).
  * @returns {Array<{ y: number, h: number, shift: number, split: number, x0: number, x1: number }>}
  */
 export function glitchBands({ seed, timeMs, intensity, height, width = 0, face = null, avoid = [], reducedMotion = false }) {
@@ -65,11 +69,18 @@ export function glitchBands({ seed, timeMs, intensity, height, width = 0, face =
       hRaw = range(rand, BAND_H[0], BAND_H[1]) * px;
     }
     const h = Math.max(1, Math.round(hRaw));
-    const y = Math.floor(rand() * Math.max(1, height - h));
+    let y;
+    if (useFace && typeof face.cy === 'number' && rand() < 0.88) {
+      const yMin = Math.max(0, Math.floor(face.cy - 1.28 * face.iod));
+      const yMax = Math.max(yMin + 1, Math.min(height - h, Math.ceil(face.cy + 2.15 * face.iod)));
+      y = Math.floor(range(rand, yMin, yMax));
+    } else {
+      y = Math.floor(rand() * Math.max(1, height - h));
+    }
     const dir = rand() < 0.5 ? -1 : 1;
     const mag = useFace ? range(rand, FACE_BAND.shift[0], FACE_BAND.shift[1]) * face.iod : range(rand, SHIFT[0], SHIFT[1]) * px;
     const shift = Math.round(dir * mag * k) || dir;
-    const split = Math.max(1, Math.round(useFace ? range(rand, FACE_BAND.split[0], FACE_BAND.split[1]) * px * 1.4 : range(rand, SPLIT[0], SPLIT[1]) * px));
+    const split = Math.max(1, Math.round(useFace ? range(rand, FACE_BAND.split[0], FACE_BAND.split[1]) * px * 1.45 : range(rand, SPLIT[0], SPLIT[1]) * px));
     let x0 = 0;
     let x1 = W;
     const side = useFace && rand() < FACE_BAND.sideShare;

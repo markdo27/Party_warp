@@ -160,16 +160,17 @@ void main() {
   vec2 px = vec2(vUv.x * uSize.x, (1.0 - vUv.y) * uSize.y);
   vec2 pUv = vec2((px.x - uBox.x) / uBox.z, 1.0 - (px.y - uBox.y) / uBox.w);
   vec3 skin = texture(uPlate, clamp(pUv, 0.001, 0.999)).rgb;
-  // In multi-copy collage modes, restore subtle real photographic cheek/forehead shading outside the
-  // central nose/lip cover zone so exposed skin gaps never read as flat solid colour (R7).
+  // In multi-copy collage modes, restore subtle real photographic cheek/forehead shading inside the
+  // original cheek contour (never pulling white background into the widened jaw plate) (R7/C2d).
   if (uRealCheekTex > 0.5) {
     vec2 d = px - uFrame.xy;
     vec2 q = vec2(d.x * uFrame.z + d.y * uFrame.w, -d.x * uFrame.w + d.y * uFrame.z) / max(1.0, uIod);
     float offNose = smoothstep(0.30, 0.48, abs(q.x)) + smoothstep(0.82, 0.96, q.y) + smoothstep(0.08, -0.08, q.y);
-    float safe = clamp(offNose, 0.0, 1.0) * smoothstep(0.25, 0.7, a);
+    float insideFace = (1.0 - smoothstep(0.68, 0.86, abs(q.x))) * (1.0 - smoothstep(1.38, 1.68, q.y));
+    float safe = clamp(offNose, 0.0, 1.0) * insideFace * smoothstep(0.25, 0.7, a);
     vec2 vUvM = vec2(uMirror > 0.5 ? 1.0 - vUv.x : vUv.x, vUv.y);
     vec3 live = texture(uVideo, clamp(vUvM, 0.001, 0.999)).rgb;
-    skin = mix(skin, live, safe * 0.55);
+    skin = mix(skin, live, safe * 0.52);
   }
   // Subtle skin-plate tone match so patch rims melt invisibly into the flattened face.
   vec3 lift = vec3(1.0, 0.973, 0.941);
@@ -356,7 +357,11 @@ void main() {
 export const SLICE_FRAG = `#version 300 es
 precision highp float;
 uniform sampler2D uCollage;
+uniform sampler2D uVideo;
+uniform sampler2D uPlate;
+uniform float uMirror;
 uniform vec2 uSize;
+uniform vec4 uBox;      // plate bbox in pixels
 uniform vec4 uFrame;    // ox, oy, ax, ay
 uniform float uIod;
 uniform vec2 uSrcUV;    // srcU, v in face units
@@ -381,9 +386,9 @@ void main() {
   float safeSlope = clamp(uOuterSlope, -0.65 * hw / max(hh, 0.02), 0.65 * hw / max(hh, 0.02));
   float outerX = hw - abs(safeSlope) * hh - safeSlope * vLocal.y;
   float dOuter = (uSide > 0.0 ? vLocal.x : -vLocal.x) - outerX;
-  // Soft inner anchor edge facing the centre of the face.
+  // Tight inner blend so >82% of each slice is solid opaque cheek/jaw skin pushing the silhouette outward (C1d/C2d).
   float innerCoord = uSide > 0.0 ? -vLocal.x : vLocal.x;
-  float innerFeather = min(uBoxWH.x * 0.42, 0.12);
+  float innerFeather = min(uBoxWH.x * 0.16, 0.045);
   float innerA = 1.0 - smoothstep(hw - innerFeather, hw, innerCoord);
 
   float topA = 1.0 - smoothstep(-aa, aa, dTop);
@@ -392,19 +397,32 @@ void main() {
   float alpha = topA * botA * outerA * innerA;
   if (alpha < 0.003) discard;
 
-  vec2 fuv = uSrcUV + vLocal;
-  vec2 px = uFrame.xy + vec2(fuv.x * uFrame.z - fuv.y * uFrame.w, fuv.x * uFrame.w + fuv.y * uFrame.z) * uIod;
-  vec2 uv = vec2(px.x / uSize.x, 1.0 - px.y / uSize.y);
-  vec3 col = texture(uCollage, clamp(uv, 0.001, 0.999)).rgb;
+  // Sample real cheek skin directly from the live camera cheek zone (|u| 0.52..0.78, v 0.36..0.92)
+  // blended lightly with the smooth skin plate so cheek/jaw tabs always carry real skin shading & pores,
+  // NEVER accidental lips, eyeballs, or washed-out white background (QA R5 C1d/C2d).
+  float uSpan = clamp(vLocal.x / max(hw, 0.05), -1.0, 1.0);
+  float cheekU = uSide * (0.64 + uSpan * uSide * 0.12);
+  float cheekV = clamp(0.46 + (uSrcUV.y - 0.5) * 0.42 + vLocal.y * 0.65, 0.36, 0.92);
+  vec2 px = uFrame.xy + vec2(cheekU * uFrame.z - cheekV * uFrame.w, cheekU * uFrame.w + cheekV * uFrame.z) * uIod;
+  vec2 vidUv = vec2(px.x / uSize.x, 1.0 - px.y / uSize.y);
+  if (uMirror > 0.5) vidUv.x = 1.0 - vidUv.x;
+  vec3 liveSkin = texture(uVideo, clamp(vidUv, 0.001, 0.999)).rgb;
+  vec2 pUv = vec2((px.x - uBox.x) / max(1.0, uBox.z), 1.0 - (px.y - uBox.y) / max(1.0, uBox.w));
+  vec3 plateSkin = texture(uPlate, clamp(pUv, 0.001, 0.999)).rgb;
+  vec3 col = mix(plateSkin, liveSkin, 0.78);
+  // Subtle sculptural directional lighting gradient across the tab so stacked cheek layers read with depth.
+  float bevel = (vLocal.y / max(hh, 0.02)) * -0.035 + (uSpan * uSide) * 0.025;
+  col = clamp(col + vec3(bevel), 0.0, 1.0);
 
   if (uShade > 0.0) col = mix(col, vec3(1.0), uShade);
   else if (uShade < 0.0) col = mix(col, vec3(0.0), -uShade);
 
-  // Crisp collage cut shadows (<= 1.5 px) on bottom and angled outer cut edges.
-  float seamW = pxUnit * 1.4;
+  // Crisp paper-cut shadows (<= 1.5 px) on bottom, top, and angled outer cut edges for readable hard collage cuts (C1d).
+  float seamW = pxUnit * 1.5;
+  float topSeam = smoothstep(-seamW, -aa * 0.2, dTop) * topA;
   float botSeam = smoothstep(-seamW, -aa * 0.2, dBot) * botA;
   float outSeam = smoothstep(-seamW, -aa * 0.2, dOuter) * outerA;
-  col *= (1.0 - max(botSeam, outSeam) * 0.18);
+  col *= (1.0 - max(max(botSeam, outSeam), topSeam * 0.45) * 0.26);
 
   fragColor = vec4(col, alpha * uGrow);
 }
@@ -425,8 +443,8 @@ uniform float uAlpha;
 uniform float uHasCollage;
 uniform float uGradeAmt;      // 0 on Minimal (pure flatten test), 1 on Default/Ref
 uniform int uBandCount;
-uniform vec4 uBandRect[16];   // x0, y0, x1, y1 in pixel coords (y-down)
-uniform vec2 uBandShift[16];  // shiftPx, splitPx
+uniform vec4 uBandRect[24];   // x0, y0, x1, y1 in pixel coords (y-down)
+uniform vec2 uBandShift[24];  // shiftPx, splitPx
 uniform float uGrainAlpha;
 uniform vec2 uGrainOffset;    // in pixels
 uniform float uGrainSize;
@@ -444,26 +462,31 @@ vec3 sampleBase(vec2 uv) {
 }
 
 /**
- * Global high-key warm magazine-scan tone curve (ref-match guide section 6).
+ * Global high-key warm magazine-scan tone curve (ref-match guide section 6, QA R5 C6b).
  * Spatially uniform across the entire frame -> ZERO rectangular box step and ZERO bright halo!
- * Neutral bright wall lifts cleanly to washed-out off-white (L ~ 225-238); warm skin shifts
- * toward ref's golden-peach flash look (L p5/p50/p95 ~ 45/172/218, R-G ~ 38, G-B ~ 30).
+ * Neutral bright wall lifts cleanly to washed-out off-white (L ~ 230-248); warm skin shifts
+ * toward ref's golden-peach flash look (L p5 <= 55, p50 165-180, p95 >= 215).
  */
 vec3 applyScanGrade(vec3 c) {
   // Smooth warmness factor: 0 for neutral grey/white background, 1 for warm skin tones.
   float warm = smoothstep(0.03, 0.14, c.r - c.b);
-  vec3 kWarm = vec3(1.85, 1.78, 0.96);
+  vec3 kWarm = vec3(1.82, 1.74, 0.94);
   vec3 kNeut = vec3(1.85, 1.85, 1.82);
   vec3 k = mix(kNeut, kWarm, warm);
   vec3 lifted = (1.0 - exp(-k * c)) / (1.0 - exp(-k));
 
-  // Luma contrast stretch around midtone keeps pupils/nostrils/open mouth deep (p5 <= 55)
-  // while pushing skin highlights & washed-out background to glossy flash brightness (p95 >= 215).
+  // Luma contrast stretch around midtone keeps pupils/nostrils/open mouth deep (p5 ~ 45-52, <= 60)
+  // while centering skin midtones at p50 ~ 172 (165-180) and highlights at p95 >= 218.
   float luma = dot(lifted, vec3(0.299, 0.587, 0.114));
-  float mid = 0.578;
-  float contrast = 1.50;
+  float mid = 0.588;
+  float contrast = 1.52;
   float delta = (luma - mid) * (contrast - 1.0);
   vec3 graded = clamp(lifted + vec3(delta), 0.0, 1.0);
+
+  // Smooth dark-toe crush preserves deep pupils, nostrils and oral cavities (ref p5 = 46)
+  // without darkening skin midtones or the washed-out white background.
+  float toe = smoothstep(0.0, 0.44, luma);
+  graded *= mix(0.74, 1.0, toe);
 
   // Subtle highlight shoulder for neutral washed-out white background without clipping skin hue.
   float hiNeut = (1.0 - warm) * smoothstep(0.72, 0.95, luma);
@@ -481,7 +504,7 @@ void main() {
   vec2 px = vec2(vUv.x * uSize.x, (1.0 - vUv.y) * uSize.y);
   float shiftPx = 0.0;
   float splitPx = 0.0;
-  for (int i = 0; i < 16; i++) {
+  for (int i = 0; i < 24; i++) {
     if (i >= uBandCount) break;
     vec4 r = uBandRect[i];
     if (px.y >= r.y && px.y < r.w && px.x >= r.x && px.x < r.z) {

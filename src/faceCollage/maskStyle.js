@@ -9,11 +9,12 @@
 export const MIN_FEATHER_SCALE = 0.7;
 
 export const MASK_STYLE = {
-  eye: { featherTop: 0.095, featherBot: 0.09, sharpen: 0.38 },
+  eye: { featherTop: 0.072, featherBot: 0.068, sharpen: 0.48 },
   // Bottom stays tight so the upper tier's nostril rim reads crisply over the lower tier (C5b).
-  nose: { featherTop: 0.075, featherBot: 0.03, sharpen: 0.48 },
-  mouth: { featherTop: 0.055, featherBot: 0.058, sharpen: 0.36 },
+  nose: { featherTop: 0.062, featherBot: 0.025, sharpen: 0.58 },
+  // Tight lip contour prevents circular fuzzy skin halos overlapping neighboring mouths (C4d).
+  mouth: { featherTop: 0.028, featherBot: 0.03, sharpen: 0.62 },
 };
 
 /** Extra quad margin (IOD, before patch scale) around each feature box; also used for bank tiles. */
-export const PATCH_PAD_IOD = 0.14;
+export const PATCH_PAD_IOD = 0.115;

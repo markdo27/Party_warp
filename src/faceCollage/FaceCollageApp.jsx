@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { cameraSupport, isFrontFacing, listCameras, mapCameraError, openCamera, stopStream } from './camera.js';
 import { CollageEngine } from './engine.js';
+import { BANK_SLOTS } from './frameBank.js';
 import { COUNT_LIMITS, PRESETS, clampCount } from './layout.js';
 import { randomSeed, seedToText, textToSeed } from './prng.js';
 import { extensionFor, startRecording } from './recorder.js';
@@ -38,6 +39,7 @@ export default function FaceCollageApp() {
   const recStoppedByGpuRef = useRef(false);
   const lostTimerRef = useRef(0);
   const onContextRef = useRef(null);
+  const startAgainRef = useRef(null);
   const sessionRef = useRef(0);
   const screenRef = useRef('intro');
   const [screen, setScreen] = useState('intro'); // intro | loading | active | stopped | error
@@ -48,6 +50,7 @@ export default function FaceCollageApp() {
   const [counts, setCounts] = useState(PRESETS.default.counts);
   const [glitch, setGlitch] = useState(PRESETS.default.glitch);
   const [bank, setBank] = useState(PRESETS.default.bank);
+  const [bankCount, setBankCount] = useState(0);
   const [seed, setSeed] = useState(INITIAL_SEED);
   const [seedText, setSeedText] = useState(seedToText(INITIAL_SEED));
   const [cameras, setCameras] = useState([]);
@@ -91,6 +94,7 @@ export default function FaceCollageApp() {
         reducedMotion: prefersReducedMotion(),
         onPhase: setPhase,
         onContext: (kind) => onContextRef.current?.(kind),
+        onBankChange: setBankCount,
         debug: DEBUG,
       });
     }
@@ -177,8 +181,17 @@ export default function FaceCollageApp() {
       const img = new Image();
       const url = URL.createObjectURL(file);
       try {
-        img.src = url;
-        await img.decode();
+        // Decode separately from ensureEngine so corrupt files always report photo-error,
+        // never misreporting model-error when the tracker has not loaded yet (QA R5 UI-F1 / P3b).
+        try {
+          img.src = url;
+          await img.decode();
+        } catch (err) {
+          if (sessionRef.current !== runId) return;
+          console.error('[face-collage] photo decode failed', err);
+          fail('photo-error');
+          return;
+        }
         if (sessionRef.current !== runId) return;
         const engine = await ensureEngine();
         if (sessionRef.current !== runId) return;
@@ -186,9 +199,8 @@ export default function FaceCollageApp() {
         setScreenSynced('active');
       } catch (err) {
         if (sessionRef.current !== runId) return;
-        console.error('[face-collage] photo failed', err);
-        if (String(err?.message).includes('WebGL2')) fail('webgl2');
-        else fail(trackerRef.current ? 'photo-error' : 'model-error');
+        console.error('[face-collage] model or renderer failed on photo', err);
+        fail(String(err?.message).includes('WebGL2') ? 'webgl2' : 'model-error');
       } finally {
         URL.revokeObjectURL(url);
       }
@@ -216,8 +228,13 @@ export default function FaceCollageApp() {
     releaseCamera();
     setErrorKind(null);
     setRecording(false);
+    setBankCount(0);
     setScreenSynced('stopped');
   }, [releaseCamera, setScreenSynced]);
+
+  useEffect(() => {
+    if (screen === 'stopped') startAgainRef.current?.focus();
+  }, [screen]);
 
   // Release the camera when the tab is hidden or the demo unmounts (foundation D4).
   useEffect(() => {
@@ -321,6 +338,16 @@ export default function FaceCollageApp() {
 
   const active = screen === 'active';
   const copy = ERROR_COPY[errorKind] ?? ERROR_COPY['camera-error'];
+  const bankTotal = BANK_SLOTS.length;
+  const bankStatusText = !bank
+    ? ''
+    : mode === 'photo' && active
+      ? 'Camera only (still photos use one frame)'
+      : active
+        ? bankCount >= bankTotal
+          ? `${bankTotal}/${bankTotal} expressions captured`
+          : `${bankCount}/${bankTotal} captured · blink, glance, or open mouth`
+        : 'Captures blinks, glances, and smiles locally';
 
   return (
     <div className="fc">
@@ -339,7 +366,7 @@ export default function FaceCollageApp() {
           {screen === 'intro' && (
             <div className="fc-panel">
               <h2>Turn your face into a collage</h2>
-              <p>Wipes your face and keeps only the eyes and mouth, then pastes extra copies around it.</p>
+              <p>Wipes your face and layers extra eyes, noses, mouths, and cheek cuts around your eyes and mouth.</p>
               <button type="button" className="fc-btn fc-primary" onClick={() => startCamera()}>Start camera</button>
               <PhotoButton onFile={startPhoto} />
               <p className="fc-small">Everything runs on this device. No image is uploaded.</p>
@@ -355,7 +382,7 @@ export default function FaceCollageApp() {
           {screen === 'stopped' && (
             <div className="fc-panel">
               <h2>Camera off</h2>
-              <button type="button" className="fc-btn fc-primary" onClick={() => startCamera()}>Start again</button>
+              <button ref={startAgainRef} type="button" className="fc-btn fc-primary" onClick={() => startCamera()}>Start again</button>
               <PhotoButton onFile={startPhoto} />
             </div>
           )}
@@ -368,7 +395,7 @@ export default function FaceCollageApp() {
                   Try again
                 </button>
               )}
-              <PhotoButton onFile={startPhoto} />
+              <PhotoButton onFile={startPhoto} primary={!copy.retry} />
             </div>
           )}
           {DEBUG && hud && <pre className="fc-hud">{JSON.stringify({ ...hud, patches: hud.patches.length, timeline: hud.timeline.slice(-4) }, null, 1)}</pre>}
@@ -388,7 +415,7 @@ export default function FaceCollageApp() {
             <button type="button" className="fc-btn" onClick={reroll} data-testid="fc-random">Random</button>
             <input className="fc-seed" value={seedText} onChange={(e) => setSeedText(e.target.value)} onBlur={commitSeed} onKeyDown={(e) => e.key === 'Enter' && commitSeed()} aria-label="Seed" maxLength={6} data-testid="fc-seed" />
           </div>
-          {notice && <p className="fc-small" role="status">{notice}</p>}
+          <p className={notice ? 'fc-small' : 'fc-sr'} role="status" aria-live="polite">{notice}</p>
           <label className="fc-field">
             <span>Preset</span>
             <select value={preset} onChange={(e) => applyPreset(e.target.value)}>
@@ -396,10 +423,17 @@ export default function FaceCollageApp() {
               {preset === 'custom' && <option value="custom">Custom</option>}
             </select>
           </label>
-          <label className="fc-check" htmlFor="fc-bank">
-            <input id="fc-bank" type="checkbox" checked={bank} onChange={(e) => { setPreset('custom'); setBank(e.target.checked); }} data-testid="fc-bank" />
-            <span>Expression memory</span>
-          </label>
+          <div className="fc-bank-group">
+            <label className="fc-check" htmlFor="fc-bank">
+              <input id="fc-bank" type="checkbox" checked={bank} onChange={(e) => { setPreset('custom'); setBank(e.target.checked); }} data-testid="fc-bank" />
+              <span>Expression memory</span>
+            </label>
+            {bank && (
+              <p className="fc-small fc-bank-status" aria-live="polite" data-testid="fc-bank-status">
+                {bankStatusText}
+              </p>
+            )}
+          </div>
           {COUNT_KEYS.map(([kind, label]) => (
             <label key={kind} className="fc-field" htmlFor={`fc-count-${kind}`}>
               <span>{label} <output>{counts[kind]}</output></span>
@@ -416,11 +450,20 @@ export default function FaceCollageApp() {
   );
 }
 
-function PhotoButton({ onFile }) {
+function PhotoButton({ onFile, primary = false }) {
   return (
-    <label className="fc-btn fc-file">
+    <label className={primary ? 'fc-btn fc-primary fc-file' : 'fc-btn fc-file'}>
       Use a photo
-      <input type="file" accept="image/*" onChange={(e) => onFile(e.target.files?.[0])} data-testid="fc-photo" />
+      <input
+        type="file"
+        accept="image/*"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = '';
+          onFile(file);
+        }}
+        data-testid="fc-photo"
+      />
     </label>
   );
 }

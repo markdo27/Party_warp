@@ -39,18 +39,21 @@ export class CollageEngine {
    *   onPhase?: (phase: string) => void, onContext?: (kind: 'lost'|'restored') => void, debug?: boolean }} opts
    *   `debug` turns on GPU frame timing (snapshot.gpuMs).
    */
-  constructor({ canvas, tracker, reducedMotion = false, onPhase, onContext, debug = false }) {
+  constructor({ canvas, tracker, reducedMotion = false, onPhase, onContext, onBankChange, debug = false }) {
     this.canvas = canvas;
     this.tracker = tracker;
     this.reducedMotion = reducedMotion;
     this.onPhase = onPhase;
     this.onContext = onContext;
+    this.onBankChange = onBankChange;
+    this.lastBankCount = -1;
     this.renderer = new CollageRenderer(canvas);
     if (debug) this.renderer.enableGpuTimer();
     this.bank = new ExpressionBank();
     // GPU atlas tiles vanish with a lost context; the CPU index must not keep pointing at them.
     this.renderer.onContextChange = (kind) => {
       this.bank.clear();
+      this.emitBank();
       this.onContext?.(kind);
     };
     /** Active clip: { push(t), stats() } from recorder.startRecording, set by the UI. */
@@ -82,6 +85,16 @@ export class CollageEngine {
     return { enabled: Boolean(this.params.bank), isStill: this.isStill, reducedMotion: this.reducedMotion };
   }
 
+  emitBank(t = now()) {
+    if (!this.onBankChange) return;
+    const enabled = Boolean(this.params.bank) && !this.isStill && !this.reducedMotion;
+    const count = enabled ? this.bank.activeCountAt(t) : 0;
+    if (count !== this.lastBankCount) {
+      this.lastBankCount = count;
+      this.onBankChange(count);
+    }
+  }
+
   /** High-key magazine-scan grade runs on Default/Ref/Custom, off on Minimal (pure flatten test Q1/Q2). */
   gradeAmount() {
     const { counts, glitch } = this.params;
@@ -104,6 +117,7 @@ export class CollageEngine {
       this.bank.clear();
       this.renderer.clearBank();
     }
+    if (bankToggled) this.emitBank();
     if (layoutChanged) {
       this.layout = makeLayout(next);
       // While holding, the frozen collage must still show the new layout.
@@ -131,6 +145,7 @@ export class CollageEngine {
     this.applySizes();
     this.bank.clear();
     this.renderer.clearBank();
+    this.emitBank();
     this.frameFilter.reset();
     this.featureFilter.reset();
     this.face = null;
@@ -178,6 +193,7 @@ export class CollageEngine {
     this.source = null;
     this.bank.clear();
     this.renderer.clearBank();
+    this.emitBank();
   }
 
   dispose() {
@@ -299,12 +315,15 @@ export class CollageEngine {
     this.renderer.beginFrame();
     if (this.tracking.phase === 'tracking' && this.face) {
       const bankUpdates = this.bank.update(this.face, t, { ...bankOpts, fresh });
+      this.emitBank(t);
       this.renderer.drawCollage(this.source, this.face, this.layout, seed, t, this.reducedMotion, {
         mirror: this.mirror,
         bank: this.bank,
         bankUpdates,
         bankOpts,
       });
+    } else {
+      this.emitBank(t);
     }
     const alpha = collageAlpha(this.tracking, t, this.reducedMotion);
     this.bands = this.renderer.compose(this.source, {
@@ -314,7 +333,7 @@ export class CollageEngine {
       now: t,
       reducedMotion: this.reducedMotion,
       avoidRows: this.protectedRows(),
-      face: this.face ? { cx: this.face.frame.ox, iod: this.face.frame.iod } : null,
+      face: this.face ? { cx: this.face.frame.ox, cy: this.face.frame.oy, iod: this.face.frame.iod } : null,
       mirror: this.mirror,
       gradeAmt: this.gradeAmount(),
     });

@@ -36,10 +36,11 @@ const PLATE_SIZE = 64;
 const BG_BLUR_DIV = 16;
 const GRAIN_SIZE = 192;
 const GRAIN_SEED = 0x46434752;
-const GRAIN_ALPHA = 0.085;
+const GRAIN_ALPHA = 0.065;
 const GRAIN_SLOT_MS = 120;
 const ADD_ANIM_MS = 150;
 const FEATHER_IOD = 0.1;
+const LIVE_BANK_MAX_AGE_MS = 60;
 const COVER = {
   eye: { w: 1.0, h: 0.82, lift: 0.12 },
   nose: { w: 0.58, top: 0.04, bottom: 0.86 },
@@ -218,7 +219,7 @@ export class CollageRenderer {
     ]);
     this.pSlice = createProgram(gl, PATCH_VERT, SLICE_FRAG, [
       'uSize', 'uFrame', 'uIod', 'uDestUV', 'uBoxWH', 'uScale', 'uRot', 'uFlipX',
-      'uCollage', 'uSrcUV', 'uSide', 'uOuterSlope', 'uGrow', 'uShade',
+      'uCollage', 'uVideo', 'uPlate', 'uMirror', 'uBox', 'uSrcUV', 'uSide', 'uOuterSlope', 'uGrow', 'uShade',
     ]);
     this.pFinal = createProgram(gl, FULLSCREEN_VERT, FINAL_FRAG, [
       'uCollage', 'uBgBlur', 'uGrain', 'uSize', 'uAlpha', 'uHasCollage', 'uGradeAmt',
@@ -346,7 +347,9 @@ export class CollageRenderer {
     this.uploadSource(source, mirror);
     const tUpload = performance.now();
 
-    const plateBox = this.renderPlate(face);
+    const hasCopies = layout.length > 3 ? 1 : 0;
+    const expandJaw = layout.some((p) => p.kind === 'cheek');
+    const plateBox = this.renderPlate(face, expandJaw);
     const tPlate = performance.now();
 
     if (bankUpdates.length > 0) this.updateBankTiles(face, bankUpdates);
@@ -368,7 +371,6 @@ export class CollageRenderer {
 
     // 2. Flattened skin plate masked by feathered face oval.
     if (plateBox) {
-      const hasCopies = layout.length > 3 ? 1 : 0;
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.useProgram(this.pPlateComp.prog);
@@ -421,7 +423,14 @@ export class CollageRenderer {
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.useProgram(this.pSlice.prog);
       this.bindTex(0, this.fboCollage.tex);
+      this.bindTex(1, this.texVideo);
+      this.bindTex(2, this.fboPlateA.tex);
       gl.uniform1i(this.pSlice.u.uCollage, 0);
+      gl.uniform1i(this.pSlice.u.uVideo, 1);
+      gl.uniform1i(this.pSlice.u.uPlate, 2);
+      gl.uniform1f(this.pSlice.u.uMirror, this.mirror ? 1 : 0);
+      const box = plateBox ?? { bx: 0, by: 0, bw: W, bh: H };
+      gl.uniform4f(this.pSlice.u.uBox, box.bx, box.by, box.bw, box.bh);
       gl.uniform2f(this.pSlice.u.uSize, W, H);
       gl.uniform4f(this.pSlice.u.uFrame, face.frame.ox, face.frame.oy, face.frame.ax, face.frame.ay);
       gl.uniform1f(this.pSlice.u.uIod, face.frame.iod);
@@ -450,11 +459,18 @@ export class CollageRenderer {
     this.layoutSeed = seed;
   }
 
-  renderPlate(face) {
+  renderPlate(face, expandJaw = false) {
     const { gl, width: W, height: H } = this;
     const { frame, features, oval } = face;
     if (!oval?.length) return null;
-    const ovalPx = oval.map((q) => toPixel(frame, q));
+    // In Ref / cheek-slice modes, widen the lower cheek/jaw skin foundation smoothly so the head
+    // swells behind outer mouths & cheek slices like `image.png` (C2d), keeping Minimal untouched.
+    const ovalPx = oval.map((q) => {
+      if (!expandJaw || q.v <= 0.05) return toPixel(frame, q);
+      const t = Math.max(0, Math.min(1, (q.v - 0.05) / 0.55)) * Math.max(0, Math.min(1, (2.05 - q.v) / 0.45));
+      const swell = 1 + 0.17 * t;
+      return toPixel(frame, { u: q.u * swell, v: q.v });
+    });
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
@@ -574,9 +590,18 @@ export class CollageRenderer {
     if (!liveFeat) return;
 
     // Top-row brow eyes use the live brow crop unless banked; lower orbital eyes use banked expressions freely.
-    const banked = !p.original && !p.brow && bank ? bank.resolve(p.expr, now, bankOpts ?? undefined) : null;
-    const feat = banked ? banked.feature : liveFeat;
-    const contour = banked?.contour ?? face.contours?.[srcKey] ?? face.contours?.[p.source] ?? ellipseContour(feat.w * 0.36, feat.h * 0.34);
+    // When a banked expression was just captured on the current live frame, sample texVideo directly
+    // to avoid double bilinear softening (QA R5 C4a).
+    const rawBanked = !p.original && !p.brow && bank ? bank.resolve(p.expr, now, bankOpts ?? undefined) : null;
+    const useBankTex = Boolean(rawBanked && now - rawBanked.capturedAt > LIVE_BANK_MAX_AGE_MS);
+    const liveMatch = Boolean(rawBanked && !useBankTex);
+    const matchedLiveKey = liveMatch ? rawBanked.sourceKey : srcKey;
+    const feat = useBankTex ? rawBanked.feature : face.features[matchedLiveKey] ?? liveFeat;
+    const contour =
+      (useBankTex ? rawBanked.contour : face.contours?.[matchedLiveKey]) ??
+      face.contours?.[srcKey] ??
+      face.contours?.[p.source] ??
+      ellipseContour(feat.w * 0.36, feat.h * 0.34);
 
     const age = now - (this.births.get(p.id) ?? -Infinity);
     const grow = age < ADD_ANIM_MS ? easeOut(age / ADD_ANIM_MS) : 1;
@@ -595,15 +620,20 @@ export class CollageRenderer {
     const plane = cutHalfPlane(feat.w, feat.h, p.cut);
     const hasCut = plane && !p.original ? 1 : 0;
 
-    if (banked) {
-      const col = banked.tileIndex % BANK_COLS;
-      const row = Math.floor(banked.tileIndex / BANK_COLS);
+    if (useBankTex) {
+      const col = rawBanked.tileIndex % BANK_COLS;
+      const row = Math.floor(rawBanked.tileIndex / BANK_COLS);
       const tw = 1 / BANK_COLS;
       const th = 1 / BANK_ROWS;
+      // Scale unsharp-mask tap spacing to ~1 camera pixel inside the 256x256 tile so teeth/lashes sharpen crisply.
+      const spanX = Math.max(16, (feat.w + 2 * PATCH_PAD_IOD) * face.frame.iod);
+      const spanY = Math.max(16, (feat.h + 2 * PATCH_PAD_IOD) * face.frame.iod);
+      const stepX = Math.max(1, BANK_TILE_SIZE / spanX);
+      const stepY = Math.max(1, BANK_TILE_SIZE / spanY);
       this.bindTex(0, this.fboBank.tex);
       gl.uniform1f(pPatch.u.uFromBank, 1);
       gl.uniform4f(pPatch.u.uTileRect, col * tw, row * th, tw, th);
-      gl.uniform2f(pPatch.u.uTexel, 1 / this.fboBank.w, 1 / this.fboBank.h);
+      gl.uniform2f(pPatch.u.uTexel, stepX / this.fboBank.w, stepY / this.fboBank.h);
     } else {
       this.bindTex(0, this.texVideo);
       gl.uniform1f(pPatch.u.uFromBank, 0);
@@ -628,7 +658,7 @@ export class CollageRenderer {
     gl.uniform1f(pPatch.u.uGrow, grow);
     gl.uniform1f(pPatch.u.uShade, p.shade ?? 0);
     gl.uniform1f(pPatch.u.uDeepen, p.deepen ?? 0);
-    gl.uniform1f(pPatch.u.uSharpen, p.original ? 0.15 : style.sharpen);
+    gl.uniform1f(pPatch.u.uSharpen, p.original ? 0.18 : useBankTex ? style.sharpen * 1.25 : style.sharpen);
     this.drawQuad();
   }
 
