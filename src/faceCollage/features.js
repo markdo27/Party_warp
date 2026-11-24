@@ -24,6 +24,7 @@ export const NOSE_INDICES = [6, 168, 197, 195, 5, 4, 1, 2, 98, 129, 327, 358, 64
 // Compact lower-bridge + tip + alar-wing contour so 2 stacked nose tiers never cover upper nostrils.
 export const NOSE_CONTOUR_INDICES = [195, 5, 4, 1, 2, 98, 129, 327, 358, 64, 294, 48, 278, 94, 19];
 export const NOSE_CENTER = [4, 2];
+export const NOSE_TIP = 1;
 export const CHEEK_A = 50;
 export const CHEEK_B = 280;
 export const FACE_OVAL = [
@@ -228,6 +229,7 @@ export function measureExpressions(lm, toFace, iod) {
     return {
       open: h / w,
       gaze: clamp((pIris.u - midU) / (w * 0.5), -1, 1),
+      width: w,
     };
   };
 
@@ -244,6 +246,13 @@ export function measureExpressions(lm, toFace, iod) {
   const cornerV = (c0.v + c1.v) * 0.5;
   const cornerLift = lipMidV - cornerV;
   const mouthSmile = mouthWidth + cornerLift * 1.6;
+  // Head-turn proxies: nose tip offset from the outer-eye-corner midpoint (IOD units) and the
+  // ratio of the two eye widths. Large turns foreshorten one eye and fake a blink or a gaze.
+  const outerA = toFace(lm[EYE_LID_A.outer]);
+  const outerB = toFace(lm[EYE_LID_B.outer]);
+  const noseTip = toFace(lm[NOSE_TIP]);
+  const yaw = noseTip.u - (outerA.u + outerB.u) * 0.5;
+  const eyeWidthRatio = Math.min(eA.width, eB.width) / Math.max(1e-4, Math.max(eA.width, eB.width));
 
   return {
     eyeOpenA: eA.open,
@@ -255,6 +264,8 @@ export function measureExpressions(lm, toFace, iod) {
     mouthWidth,
     cornerLift,
     mouthSmile,
+    yaw,
+    eyeWidthRatio,
   };
 }
 

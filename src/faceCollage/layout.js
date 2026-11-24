@@ -54,7 +54,7 @@ export const SLOTS = {
     { u: -0.42, v: 1.04, scale: 0.94, expr: 'mouthClosed' },
     { u: -0.06, v: 1.72, scale: 1.36, expr: 'mouthOpen' },
     { u: -0.72, v: 1.46, scale: 1.3, expr: 'mouthOpen' },
-    { u: 0.58, v: 1.42, scale: 1.24, expr: 'mouthSmile' },
+    { u: 0.58, v: 1.42, scale: 1.24, expr: 'mouthTeeth' },
     { u: 0.42, v: 1.01, scale: 0.88, expr: 'mouthClosed' },
     { u: 0.44, v: 2.16, scale: 1.16, expr: 'mouthOpen' },
   ],

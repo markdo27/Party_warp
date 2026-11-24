@@ -9,6 +9,7 @@ import { CollageRenderer } from './renderer.js';
 import { OneEuro, arrayToFrame, frameToArray, measureFace, toPixel, toPixels } from './faceFrame.js';
 import { arrayToFeatures, featuresToArray } from './features.js';
 import { makeLayout } from './layout.js';
+import { measureTeeth } from './teeth.js';
 import { collageAlpha, initialTracking, stepTracking } from './trackingState.js';
 
 const MAX_OUT_SIDE = 960; // output canvas long side (perf on mid phones)
@@ -18,8 +19,11 @@ const EYE_BAND_IOD = 0.3;
 const NOSE_BAND_V = [0.22, 0.85];
 const FPS_WINDOW_MS = 1000;
 const TIMELINE_MAX = 400;
+/** Inner-lip gap (IOD units) above which visible teeth are worth measuring at all. */
+const TEETH_MEASURE_MIN_GAP = 0.02;
 
 const now = () => performance.now();
+const roundExpr = (e) => Object.fromEntries(Object.entries(e).map(([k, v]) => [k, typeof v === 'number' ? Math.round(v * 1000) / 1000 : v]));
 
 function fitSize(w, h) {
   const k = Math.min(1, MAX_OUT_SIDE / Math.max(w, h));
@@ -38,6 +42,8 @@ export class CollageEngine {
     this.onPhase = onPhase;
     this.renderer = new CollageRenderer(canvas);
     this.bank = new ExpressionBank();
+    // GPU atlas tiles vanish with a lost context; the CPU index must not keep pointing at them.
+    this.renderer.onContextChange = () => this.bank.clear();
     // Small detect canvas only (480px); WebGL2 samples source directly with shader mirroring.
     this.detectCanvas = document.createElement('canvas');
     this.dctx = this.detectCanvas.getContext('2d', { willReadFrequently: false });
@@ -55,7 +61,7 @@ export class CollageEngine {
     this.running = false;
     this.face = null;
     this.tracking = initialTracking(now());
-    this.stats = { fps: 0, detectMs: 0, renderMs: 0, frames: 0, fpsFrames: 0, fpsAt: now(), skipNext: false };
+    this.stats = { fps: 0, detectMs: 0, teethMs: 0, renderMs: 0, frames: 0, fpsFrames: 0, fpsAt: now(), skipNext: false };
     this.timeline = [];
     this.bands = [];
   }
@@ -180,7 +186,29 @@ export class CollageEngine {
     // The detect canvas is already mirrored, so landmarks map straight onto output pixels.
     const measured = measureFace(toPixels(lm, this.outWidth, this.outHeight, false));
     if (this.isStill && measured) this.stillFace = measured;
-    return measured;
+    return measured ? this.withTeeth(measured, lm) : measured;
+  }
+
+  /**
+   * Adds the visible-teeth share to the expressions, measured on the same detect frame as the
+   * landmarks. Only when the bank could use it (live source, bank on, lips apart): it costs a
+   * small getImageData. `teeth: null` means "not judged", never "has teeth".
+   */
+  withTeeth(measured, lm) {
+    const e = measured.expressions;
+    const { enabled, isStill, reducedMotion } = this.bankOpts();
+    if (!enabled || isStill || reducedMotion || !e || e.mouthOpen < TEETH_MEASURE_MIN_GAP) {
+      return e ? { ...measured, expressions: { ...e, teeth: null } } : measured;
+    }
+    const t0 = now();
+    let res = null;
+    try {
+      res = measureTeeth(this.dctx, lm);
+    } catch (err) {
+      console.warn('[face-collage] teeth measurement skipped', err);
+    }
+    this.stats.teethMs = now() - t0;
+    return { ...measured, expressions: { ...e, teeth: res ? res.frac : null } };
   }
 
   smooth(raw, t) {
@@ -193,7 +221,10 @@ export class CollageEngine {
 
   step(t) {
     if (!this.source) return;
+    if (this.renderer.lost) return; // §6.1: nothing to draw into until webglcontextrestored
     const raw = this.detect(t);
+    // Captures need landmarks measured on this very video frame (not a skipped or held one).
+    const fresh = Boolean(raw) && !this.isStill;
     if (raw !== undefined) {
       const before = this.tracking.phase;
       if (raw && (before === 'searching' || before === 'lost')) {
@@ -224,7 +255,7 @@ export class CollageEngine {
     const { seed, glitch } = this.params;
     const bankOpts = this.bankOpts();
     if (this.tracking.phase === 'tracking' && this.face) {
-      const bankUpdates = this.bank.update(this.face, t, bankOpts);
+      const bankUpdates = this.bank.update(this.face, t, { ...bankOpts, fresh });
       this.renderer.drawCollage(this.source, this.face, this.layout, seed, t, this.reducedMotion, {
         mirror: this.mirror,
         bank: this.bank,
@@ -284,7 +315,7 @@ export class CollageEngine {
   /** Read-only state for the debug HUD and the e2e tests (window.__faceCollage). */
   snapshot() {
     const t = now();
-    const { fps, detectMs, renderMs, frames } = this.stats;
+    const { fps, detectMs, teethMs, renderMs, frames } = this.stats;
     const counts = this.layout.reduce((acc, p) => ({ ...acc, [p.kind]: (acc[p.kind] ?? 0) + 1 }), {});
     return {
       renderer: this.renderer.backend,
@@ -293,6 +324,9 @@ export class CollageEngine {
       timeline: this.timeline.slice(),
       fps: Math.round(fps * 10) / 10,
       detectMs: Math.round(detectMs * 10) / 10,
+      teethMs: Math.round(teethMs * 100) / 100,
+      contextLost: this.renderer.lost,
+      contextEvents: { ...this.renderer.contextEvents },
       renderMs: Math.round(renderMs * 10) / 10,
       stages: Object.fromEntries(Object.entries(this.renderer.timings ?? {}).map(([k, v]) => [k, Math.round(v * 10) / 10])),
       frames,
@@ -301,6 +335,7 @@ export class CollageEngine {
       glitch: this.params.glitch,
       bankEnabled: Boolean(this.params.bank),
       bank: this.bank.summary(t, this.face?.expressions ?? null),
+      expressions: this.face?.expressions ? roundExpr(this.face.expressions) : null,
       bands: this.bands.length,
       counts,
       patches: this.layout.map(({ id, kind, u, v, scale, rot, mask, expr, cut }) => ({

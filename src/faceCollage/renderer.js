@@ -138,7 +138,47 @@ export class CollageRenderer {
     this.layoutSeed = null;
     this.hasCollage = false;
     this.timings = {};
+    this.lost = false;
+    this.contextEvents = { lost: 0, restored: 0 };
+    /** Set by the owner; called with 'lost' | 'restored' so CPU state tied to GPU tiles can be dropped. */
+    this.onContextChange = null;
 
+    this.polyScratch = new Float32Array(32); // 16 vec2 contour vertices
+    this.bandRects = new Float32Array(MAX_GLITCH_BANDS * 4);
+    this.bandShifts = new Float32Array(MAX_GLITCH_BANDS * 2);
+
+    this.initGeometry();
+    this.initPrograms();
+    this.initResources();
+
+    // Architecture-r5 §6.1: a lost context keeps the page alive, restore rebuilds every GPU object.
+    this.handleContextLost = (ev) => {
+      ev.preventDefault();
+      this.lost = true;
+      this.hasCollage = false;
+      this.contextEvents = { ...this.contextEvents, lost: this.contextEvents.lost + 1 };
+      this.onContextChange?.('lost');
+    };
+    this.handleContextRestored = () => {
+      this.initGeometry();
+      this.initPrograms();
+      this.initResources();
+      const { width: w, height: h } = this;
+      this.out.width = 0; // force resize() to rebuild size-dependent targets
+      this.resize(w, h);
+      this.births = new Map();
+      this.layoutSeed = null;
+      this.hasCollage = false;
+      this.lost = false;
+      this.contextEvents = { ...this.contextEvents, restored: this.contextEvents.restored + 1 };
+      this.onContextChange?.('restored');
+    };
+    outCanvas.addEventListener('webglcontextlost', this.handleContextLost);
+    outCanvas.addEventListener('webglcontextrestored', this.handleContextRestored);
+  }
+
+  initGeometry() {
+    const { gl } = this;
     this.emptyVao = gl.createVertexArray();
     this.polyVao = gl.createVertexArray();
     this.polyBuf = gl.createBuffer();
@@ -147,13 +187,6 @@ export class CollageRenderer {
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
-
-    this.polyScratch = new Float32Array(32); // 16 vec2 contour vertices
-    this.bandRects = new Float32Array(MAX_GLITCH_BANDS * 4);
-    this.bandShifts = new Float32Array(MAX_GLITCH_BANDS * 2);
-
-    this.initPrograms();
-    this.initResources();
   }
 
   initPrograms() {
@@ -659,6 +692,9 @@ export class CollageRenderer {
 
   dispose() {
     const { gl } = this;
+    this.out.removeEventListener('webglcontextlost', this.handleContextLost);
+    this.out.removeEventListener('webglcontextrestored', this.handleContextRestored);
+    this.onContextChange = null;
     this.clearBank();
     for (const p of [this.pCopy, this.pPoly, this.pBlur, this.pPlateSeed, this.pPlateComp, this.pBankCrop, this.pPatch, this.pSlice, this.pFinal]) {
       if (p?.prog) gl.deleteProgram(p.prog);

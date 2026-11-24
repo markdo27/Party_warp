@@ -34,7 +34,7 @@ describe('Round 5 architecture (organic masks, selective cuts, frame bank roles)
     expect(mouths.every((p) => p.mask === 'organic-mouth')).toBe(true);
     expect(eyes.some((p) => p.expr === 'eyeClosed')).toBe(true);
     expect(mouths.some((p) => p.expr === 'mouthOpen')).toBe(true);
-    expect(mouths.some((p) => p.expr === 'mouthSmile')).toBe(true);
+    expect(mouths.some((p) => p.expr === 'mouthTeeth')).toBe(true);
     expect(Math.max(...mouths.map((m) => m.v))).toBeGreaterThanOrEqual(2.1);
     for (const p of [...eyes, ...noses, ...mouths]) {
       const plane = cutHalfPlane(0.8, 0.6, p.cut);
