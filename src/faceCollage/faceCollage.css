@@ -4,6 +4,10 @@
   --fc-paper: #fefefe;
   --fc-muted: color-mix(in srgb, var(--fc-ink) 68%, var(--fc-paper));
   --fc-line: color-mix(in srgb, var(--fc-ink) 18%, var(--fc-paper));
+  --fc-line-strong: color-mix(in srgb, var(--fc-ink) 50%, var(--fc-paper));
+  --fc-rec: #c8102e;
+  --fc-head-h: 52px;
+  --fc-actions-h: 72px;
   --fc-hover: color-mix(in srgb, var(--fc-ink) 8%, var(--fc-paper));
   --fc-primary-hover: color-mix(in srgb, var(--fc-ink) 84%, var(--fc-paper));
   --fc-stage: var(--fc-ink);
@@ -54,9 +58,19 @@ body { background: var(--fc-paper); color: var(--fc-ink); font-family: var(--fc-
 .fc-field span { display: flex; justify-content: space-between; }
 .fc-field output { font-variant-numeric: tabular-nums; color: var(--fc-muted); }
 .fc-field input[type='range'] { width: 100%; height: var(--fc-tap); accent-color: var(--fc-ink); }
-.fc-field select, .fc-seed { min-height: var(--fc-tap); padding: 0 var(--fc-space-3); border: 1px solid var(--fc-line); border-radius: var(--fc-radius); background: var(--fc-paper); color: var(--fc-ink); font: inherit; }
+.fc-field select, .fc-seed { min-height: var(--fc-tap); padding: 0 var(--fc-space-3); border: 1px solid var(--fc-line-strong); border-radius: var(--fc-radius); background: var(--fc-paper); color: var(--fc-ink); font: inherit; }
 .fc-seed { width: 100%; font-family: ui-monospace, monospace; text-transform: lowercase; }
 .fc-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--fc-space-2); }
+.fc-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--fc-space-2); }
+.fc-actions .fc-btn { padding: 0 var(--fc-space-2); gap: var(--fc-space-2); }
+.fc-rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--fc-rec); flex: none; }
+.fc-sr { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+/* Mobile: the camera actions stay reachable under the preview (UX U1). */
+@media (max-width: 899px) {
+  .fc-canvas { max-height: calc(100svh - var(--fc-tap) - var(--fc-actions-h) - var(--fc-head-h)); }
+  .fc { padding-bottom: calc(var(--fc-actions-h) + env(safe-area-inset-bottom)); }
+  .fc-actions { position: fixed; left: 0; right: 0; bottom: 0; z-index: 2; padding: var(--fc-space-3) var(--fc-space-4) calc(var(--fc-space-3) + env(safe-area-inset-bottom)); background: var(--fc-paper); border-top: 1px solid var(--fc-line-strong); }
+}
 
 .fc-btn { min-height: var(--fc-tap); padding: 0 var(--fc-space-4); border: 1px solid var(--fc-ink); border-radius: var(--fc-radius); background: var(--fc-paper); color: var(--fc-ink); font: inherit; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; transition: background-color 120ms, transform 120ms; }
 .fc-btn:hover:not(:disabled) { background: var(--fc-hover); }
@@ -73,4 +87,5 @@ body { background: var(--fc-paper); color: var(--fc-ink); font-family: var(--fc-
 
 @media (prefers-reduced-motion: reduce) {
   .fc-btn { transition: none; }
+  .fc-rec-dot { animation: none; }
 }

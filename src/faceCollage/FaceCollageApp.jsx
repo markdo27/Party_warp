@@ -92,7 +92,10 @@ export default function FaceCollageApp() {
   const startCamera = useCallback(
     async (wantedId = deviceId) => {
       const unsupported = cameraSupport();
-      if (unsupported) return fail(unsupported);
+      if (unsupported) {
+        releaseCamera();
+        return fail(unsupported);
+      }
       releaseCamera();
       const runId = sessionRef.current;
       setErrorKind(null);
@@ -273,6 +276,7 @@ export default function FaceCollageApp() {
       setRecording(true);
       const blob = await rec.done;
       download(blob, `face-collage-${seedToText(seed)}.${extensionFor(rec.type)}`);
+      setNotice('Clip saved');
     } catch (err) {
       setNotice(err?.message ?? 'Recording failed');
     } finally {
@@ -332,11 +336,15 @@ export default function FaceCollageApp() {
           {DEBUG && hud && <pre className="fc-hud">{JSON.stringify({ ...hud, patches: hud.patches.length, timeline: hud.timeline.slice(-4) }, null, 1)}</pre>}
         </section>
         <aside className="fc-controls" aria-label="Collage controls">
-          <button type="button" className="fc-btn fc-stop" onClick={stopAll} disabled={!active && screen !== 'loading'} data-testid="fc-stop">Stop camera</button>
-          <div className="fc-row">
+          <div className="fc-actions" role="toolbar" aria-label="Camera actions">
+            <button type="button" className="fc-btn fc-stop" onClick={stopAll} disabled={!active && screen !== 'loading'} data-testid="fc-stop">Stop camera</button>
             <button type="button" className="fc-btn" onClick={savePng} disabled={!active}>PNG</button>
-            <button type="button" className="fc-btn" onClick={toggleRecord} disabled={!active} aria-pressed={recording}>{recording ? 'Stop rec' : 'Record'}</button>
+            <button type="button" className="fc-btn" onClick={toggleRecord} disabled={!active} aria-pressed={recording} data-testid="fc-record">
+              {recording && <span className="fc-rec-dot" aria-hidden="true" />}
+              {recording ? 'Save clip' : 'Record'}
+            </button>
           </div>
+          {recording && <p className="fc-sr" aria-live="polite">Recording</p>}
           {mode === 'camera' && cameras.length > 1 && active && <button type="button" className="fc-btn" onClick={switchCamera}>Switch camera</button>}
           <div className="fc-row">
             <button type="button" className="fc-btn" onClick={reroll} data-testid="fc-random">Random</button>
@@ -351,14 +359,14 @@ export default function FaceCollageApp() {
             </select>
           </label>
           {COUNT_KEYS.map(([kind, label]) => (
-            <label key={kind} className="fc-field">
+            <label key={kind} className="fc-field" htmlFor={`fc-count-${kind}`}>
               <span>{label} <output>{counts[kind]}</output></span>
-              <input type="range" aria-label={label} min={COUNT_LIMITS[kind].min} max={COUNT_LIMITS[kind].max} step="1" value={counts[kind]} onChange={(e) => setCount(kind, e.target.value)} data-testid={`fc-count-${kind}`} />
+              <input id={`fc-count-${kind}`} type="range" min={COUNT_LIMITS[kind].min} max={COUNT_LIMITS[kind].max} step="1" value={counts[kind]} onChange={(e) => setCount(kind, e.target.value)} data-testid={`fc-count-${kind}`} />
             </label>
           ))}
-          <label className="fc-field">
+          <label className="fc-field" htmlFor="fc-glitch">
             <span>Glitch <output>{Math.round(glitch * 100)}</output></span>
-            <input type="range" aria-label="Glitch" min="0" max="100" step="1" value={Math.round(glitch * 100)} onChange={(e) => { setPreset('custom'); setGlitch(Number(e.target.value) / 100); }} />
+            <input id="fc-glitch" type="range" aria-valuetext={`${Math.round(glitch * 100)}%`} min="0" max="100" step="1" value={Math.round(glitch * 100)} onChange={(e) => { setPreset('custom'); setGlitch(Number(e.target.value) / 100); }} />
           </label>
         </aside>
       </main>

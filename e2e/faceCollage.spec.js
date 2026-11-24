@@ -195,3 +195,22 @@ test('stop during camera startup does not show a false busy error', async ({ pag
   expect(live).toBe(0);
   expect(httpErrors).toEqual([]);
 });
+
+test('mobile 360px: camera actions stay on screen, sliders have one name each', async ({ browser }) => {
+  test.setTimeout(90_000);
+  const ctx = await browser.newContext({ viewport: { width: 360, height: 740 } });
+  const page = await ctx.newPage();
+  await page.goto(URL_);
+  await page.getByRole('button', { name: 'Start camera' }).click();
+  await waitPhase(page, 'tracking', 60_000);
+  const bar = page.getByRole('toolbar', { name: 'Camera actions' });
+  for (const name of ['Stop camera', 'PNG', 'Record']) await expect(bar.getByRole('button', { name })).toBeInViewport();
+  const box = await bar.boundingBox();
+  expect(box.y + box.height).toBeLessThanOrEqual(740 + 1);
+  for (const b of await bar.getByRole('button').all()) expect((await b.boundingBox()).height).toBeGreaterThanOrEqual(44);
+  await expect(page.getByRole('slider', { name: /^Glitch/ })).toHaveAttribute('aria-valuetext', /%$/);
+  await expect(page.getByRole('slider', { name: /^Eyes?/ })).toHaveCount(1);
+  await bar.getByRole('button', { name: 'Stop camera' }).click();
+  await expect(page.getByRole('heading', { name: 'Camera off' })).toBeVisible();
+  await ctx.close();
+});

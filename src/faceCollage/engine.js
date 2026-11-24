@@ -171,7 +171,7 @@ export class CollageEngine {
       this.renderer.drawCollage(this.frameCanvas, this.face, this.layout, seed, t, this.reducedMotion);
     }
     const alpha = collageAlpha(this.tracking, t, this.reducedMotion);
-    this.bands = this.renderer.compose(this.frameCanvas, { alpha, seed, glitch, now: t, reducedMotion: this.reducedMotion, avoidRows: this.eyeRows() });
+    this.bands = this.renderer.compose(this.frameCanvas, { alpha, seed, glitch, now: t, reducedMotion: this.reducedMotion, avoidRows: this.eyeRows(), face: this.face ? { cx: this.face.frame.ox, iod: this.face.frame.iod } : null });
     this.stats.renderMs = now() - r0;
     this.countFps(t);
   }

@@ -1,11 +1,14 @@
 /**
  * Canvas 2D renderer for the Face Collage prototype.
  *   1. flatten: replace the face oval with a blurred, brightened skin plate (soft edge, no seam)
- *   2. patches: cut eye / nose / mouth / cheek boxes from the live frame, hard edges, placed in the face frame
- *   3. compose + glitch: blur fallback while no face, slip bands with an R/B split, grain
+ *   2. patches: eye / nose / mouth boxes from the live frame on the ref slot table; 1-2 hard cut edges,
+ *      the rest feathered into the layer below (ref-match guide section 4)
+ *   3. edge slices: strips of the finished collage at the face edge pushed outwards (guide section 5)
+ *   4. tone grade: lift + warm curve inside the face ellipse (guide section 2)
+ *   5. compose + glitch: blur fallback while no face, slip bands at the face edges with an R/B split, grain
  * Note: the foundation planned WebGL2; this prototype uses Canvas 2D to ship faster (see report).
  */
-import { cutPolygon } from './layout.js';
+import { cutPolygon, softEdges } from './layout.js';
 import { frameMatrix, toPixel } from './faceFrame.js';
 import { glitchBands } from './glitch.js';
 import { mulberry32 } from './prng.js';
@@ -15,6 +18,11 @@ const PLATE_GRID = 32; // working size of the skin plate before blurring
 const PLATE_BLUR_GRID = 8; // ~0.35 IOD blur radius on a typical face
 const PLATE_BRIGHTEN = 'rgba(255,248,240,0.10)'; // warm ~+0.25 EV lift
 const FEATHER_IOD = 0.10;
+const PATCH_FEATHER_IOD = 0.12; // soft patch edges; guide says ~0.05 IOD, 0.12 hides the box sides at phone sizes
+const MAX_SCRATCH_PX = 1024;
+/** Tone grade: lift curve y = (1 - e^(-kx)) / (1 - e^(-k)) per channel, then a contrast stretch around `mid`. */
+const GRADE = { k: [1.6, 1.55, 1.0], mid: 150, contrast: 1.45, u0: 0, v0: 0.65, ru: 1.2, rv: 1.7, feather: 0.18, outside: 0.25 };
+const EDGE_INDEX = { top: [0, 1], right: [1, 2], bottom: [2, 3], left: [3, 0] };
 const OVAL_INSET = 1.0; // full face oval so forehead/cheeks flatten cleanly while shadowBlur feathers the edge
 const SEAM_PX = 1;
 const SEAM_COLOR = 'rgba(0,0,0,0.16)';
@@ -48,8 +56,6 @@ function pathPoly(ctx, pts) {
   pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
   ctx.closePath();
 }
-
-const EDGE_INDEX = { top: [0, 1], right: [1, 2], bottom: [2, 3], left: [3, 0] };
 
 function makeGrain() {
   const rand = mulberry32(GRAIN_SEED);
@@ -116,8 +122,12 @@ export class CollageRenderer {
     this.trackBirths(layout, seed, now, reducedMotion);
     const F = frameMatrix(face.frame);
     const Finv = invert(F);
-    for (const p of layout) this.drawPatch(source, face, p, F, Finv, now);
+    for (const p of layout) {
+      if (p.kind === 'cheek') this.drawSlice(face, p, F, Finv, now);
+      else this.drawPatch(source, face, p, F, Finv, now);
+    }
     cctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.grade(face);
     cctx.globalAlpha = 1;
     this.hasCollage = true;
   }
@@ -141,34 +151,156 @@ export class CollageRenderer {
     const dv = p.original ? f.v : p.v;
     const s = p.scale * (0.6 + 0.4 * grow);
     const pts = cutPolygon(f.w, f.h, p.cut);
+    // Patch is built in a face-aligned scratch canvas, then pasted with move / rotate / flip.
+    const { x, sw, sh, kx } = this.scratchFor(f.w, f.h, face.frame.iod * s);
+    x.save();
+    pathPoly(x, pts);
+    x.clip();
+    x.save();
+    x.translate(-f.u, -f.v);
+    x.transform(...Finv);
+    x.drawImage(source, 0, 0, this.collage.width, this.collage.height);
+    x.restore();
+    this.shadeScratch(x, f.w, f.h, p.shade);
+    x.restore();
+    this.finishEdges(x, f.w, f.h, pts, p.cut, PATCH_FEATHER_IOD / s, (SEAM_PX * 2) / kx);
     cctx.save();
     cctx.globalAlpha = grow;
     cctx.setTransform(...F);
     cctx.translate(du, dv);
     cctx.rotate((p.rot * Math.PI) / 180);
     cctx.scale(p.flipX ? -s : s, s);
-    pathPoly(cctx, pts);
-    cctx.clip();
+    cctx.drawImage(this.scratch, 0, 0, sw, sh, -f.w / 2, -f.h / 2, f.w, f.h);
+    cctx.restore();
+  }
+
+  /** Edge slice: copies a strip of the finished collage at srcU and pastes it `shift` further out. */
+  drawSlice(face, p, F, Finv, now) {
+    const { cctx } = this;
+    const age = now - (this.births.get(p.id) ?? -Infinity);
+    const grow = age < ADD_ANIM_MS ? easeOut(age / ADD_ANIM_MS) : 1;
+    const w = p.len;
+    const h = p.h;
+    const pts = cutPolygon(w, h, p.cut);
+    const { x, sw, sh, kx } = this.scratchFor(w, h, face.frame.iod);
+    x.save();
+    x.translate(-p.srcU, -p.v);
+    x.transform(...Finv);
+    x.drawImage(this.collage, 0, 0);
+    x.restore();
+    this.shadeScratch(x, w, h, p.shade);
+    this.finishEdges(x, w, h, pts, p.cut, PATCH_FEATHER_IOD, (SEAM_PX * 2) / kx);
     cctx.save();
-    cctx.translate(-f.u, -f.v);
-    cctx.transform(...Finv);
-    cctx.drawImage(source, 0, 0, this.collage.width, this.collage.height);
+    cctx.globalAlpha = grow;
+    cctx.setTransform(...F);
+    cctx.translate(p.srcU + p.shift * grow, p.v);
+    cctx.drawImage(this.scratch, 0, 0, sw, sh, -w / 2, -h / 2, w, h);
     cctx.restore();
-    // Subtle deterministic brightness jitter (±6%) and 1 px paste seam on copies so overlaps read clearly.
-    if (!p.original) {
-      if (p.shade) {
-        cctx.fillStyle = p.shade > 0 ? `rgba(255,255,255,${p.shade.toFixed(3)})` : `rgba(0,0,0,${(-p.shade).toFixed(3)})`;
-        cctx.fillRect(-f.w, -f.h, f.w * 2, f.h * 2);
-      }
-      const [i, j] = EDGE_INDEX[p.shadowEdge] ?? EDGE_INDEX.bottom;
-      cctx.beginPath();
-      cctx.moveTo(...pts[i]);
-      cctx.lineTo(...pts[j]);
-      cctx.lineWidth = (SEAM_PX * 2) / (face.frame.iod * s);
-      cctx.strokeStyle = SEAM_COLOR;
-      cctx.stroke();
+  }
+
+  /** Patch-local scratch canvas at `k` px per face unit, local origin at its centre. */
+  scratchFor(w, h, k) {
+    if (!this.scratch) {
+      this.scratch = make();
+      this.xctx = ctx2d(this.scratch);
     }
-    cctx.restore();
+    const sw = Math.max(2, Math.min(MAX_SCRATCH_PX, Math.ceil(w * k)));
+    const sh = Math.max(2, Math.min(MAX_SCRATCH_PX, Math.ceil(h * k)));
+    this.scratch.width = sw; // resizing also clears
+    this.scratch.height = sh;
+    const kx = sw / w;
+    this.xctx.setTransform(kx, 0, 0, sh / h, sw / 2, sh / 2);
+    return { x: this.xctx, sw, sh, kx };
+  }
+
+  /** Deterministic brightness jitter (about ±5%) so stacked copies read as separate pieces. */
+  shadeScratch(x, w, h, shade) {
+    if (!shade) return;
+    x.save();
+    x.globalCompositeOperation = 'source-atop';
+    x.fillStyle = shade > 0 ? `rgba(255,255,255,${shade.toFixed(3)})` : `rgba(0,0,0,${(-shade).toFixed(3)})`;
+    x.fillRect(-w, -h, w * 2, h * 2);
+    x.restore();
+  }
+
+  /** Feathers soft edges with destination-out ramps and draws a 1 px seam along the hard (cut) edges. */
+  finishEdges(x, w, h, pts, cut, feather, seamW) {
+    x.save();
+    x.globalCompositeOperation = 'destination-out';
+    for (const e of softEdges(cut)) {
+      const vert = e === 'top' || e === 'bottom';
+      const half = (vert ? h : w) / 2;
+      const sign = e === 'top' || e === 'left' ? -1 : 1;
+      const outer = sign * half;
+      const inner = outer - sign * feather;
+      const g = vert ? x.createLinearGradient(0, outer, 0, inner) : x.createLinearGradient(outer, 0, inner, 0);
+      g.addColorStop(0, 'rgba(0,0,0,1)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      x.fillStyle = g;
+      const a = Math.min(outer, inner);
+      if (vert) x.fillRect(-w, a, w * 2, feather);
+      else x.fillRect(a, -h, feather, h * 2);
+    }
+    x.globalCompositeOperation = 'source-atop';
+    x.strokeStyle = SEAM_COLOR;
+    x.lineWidth = seamW;
+    for (const e of cut.hard ?? []) {
+      const [i, j] = EDGE_INDEX[e];
+      x.beginPath();
+      x.moveTo(...pts[i]);
+      x.lineTo(...pts[j]);
+      x.stroke();
+    }
+    x.restore();
+  }
+
+  /** Lift + warm tone curve inside a feathered face ellipse (guide section 2); mild lift outside it. */
+  grade(face) {
+    if (!this.lut) {
+      this.lut = GRADE.k.map((kk) => {
+        const t = new Uint8ClampedArray(256);
+        for (let i = 0; i < 256; i += 1) t[i] = Math.round((255 * (1 - Math.exp((-kk * i) / 255))) / (1 - Math.exp(-kk)));
+        return t;
+      });
+      // Contrast is stretched on luma only (same offset on R, G, B) so it does not push the chroma.
+      this.lumaDelta = new Float32Array(256);
+      for (let i = 0; i < 256; i += 1) this.lumaDelta[i] = (i - GRADE.mid) * (GRADE.contrast - 1);
+    }
+    const ld = this.lumaDelta;
+    const { frame } = face;
+    const { width: W, height: H } = this.collage;
+    const c = toPixel(frame, { u: GRADE.u0, v: GRADE.v0 });
+    const r = Math.max(GRADE.ru, GRADE.rv) * (1 + GRADE.feather) * frame.iod;
+    const x0 = Math.max(0, Math.floor(c.x - r));
+    const y0 = Math.max(0, Math.floor(c.y - r));
+    const x1 = Math.min(W, Math.ceil(c.x + r));
+    const y1 = Math.min(H, Math.ceil(c.y + r));
+    if (x1 - x0 < 2 || y1 - y0 < 2) return;
+    const img = this.cctx.getImageData(x0, y0, x1 - x0, y1 - y0);
+    const d = img.data;
+    const [lr, lg, lb] = this.lut;
+    const iw = x1 - x0;
+    const inv = 1 / frame.iod;
+    for (let yy = y0; yy < y1; yy += 1) {
+      const py = yy + 0.5 - frame.oy;
+      for (let xx = x0; xx < x1; xx += 1) {
+        const px = xx + 0.5 - frame.ox;
+        const du = ((px * frame.ax + py * frame.ay) * inv - GRADE.u0) / GRADE.ru;
+        const dv = ((-px * frame.ay + py * frame.ax) * inv - GRADE.v0) / GRADE.rv;
+        const q = Math.sqrt(du * du + dv * dv);
+        const inside = q <= 1 ? 1 : q >= 1 + GRADE.feather ? 0 : 1 - (q - 1) / GRADE.feather;
+        const m = GRADE.outside + (1 - GRADE.outside) * inside;
+        const o = ((yy - y0) * iw + (xx - x0)) * 4;
+        const r0 = lr[d[o]];
+        const g0 = lg[d[o + 1]];
+        const b0 = lb[d[o + 2]];
+        const lift = ld[(0.299 * r0 + 0.587 * g0 + 0.114 * b0) | 0];
+        d[o] += (r0 + lift - d[o]) * m;
+        d[o + 1] += (g0 + lift - d[o + 1]) * m;
+        d[o + 2] += (b0 + lift - d[o + 2]) * m;
+      }
+    }
+    this.cctx.putImageData(img, x0, y0);
   }
 
   /** Skin plate: face oval with features painted over in cheek colour, blurred, brightened, soft-edged. */
@@ -267,7 +399,7 @@ export class CollageRenderer {
   }
 
   /** Final frame: blurred camera under the collage (privacy while searching / lost), then glitch + grain. */
-  compose(source, { alpha, seed, glitch, now, reducedMotion, avoidRows }) {
+  compose(source, { alpha, seed, glitch, now, reducedMotion, avoidRows, face = null }) {
     const { octx } = this;
     const { width: W, height: H } = this.out;
     octx.setTransform(1, 0, 0, 1, 0, 0);
@@ -279,7 +411,7 @@ export class CollageRenderer {
       octx.drawImage(this.collage, 0, 0);
       octx.globalAlpha = 1;
     }
-    const bands = glitchBands({ seed, timeMs: now, intensity: glitch * alpha, height: H, avoid: avoidRows, reducedMotion });
+    const bands = glitchBands({ seed, timeMs: now, intensity: glitch * alpha, height: H, width: W, face, avoid: avoidRows, reducedMotion });
     for (const band of bands) this.slipBand(band, W);
     const grainAmt = glitch * alpha;
     if (grainAmt > 0) {
@@ -305,16 +437,19 @@ export class CollageRenderer {
   }
 
   /** Shifts one band sideways and pulls R right / B left (channel split, no new colours). */
-  slipBand({ y, h, shift, split }, W) {
+  slipBand({ y, h, shift, split, x0 = 0, x1 = W }, W) {
+    const bx = Math.max(0, x0);
+    const bw = Math.min(W, x1) - bx;
+    if (bw < 1) return;
     const src = this.octx.getImageData(0, y, W, h);
-    const dst = this.octx.createImageData(W, h);
+    const dst = this.octx.createImageData(bw, h);
     const s = src.data;
     const d = dst.data;
     const clampX = (x) => (x < 0 ? 0 : x >= W ? W - 1 : x);
     for (let row = 0; row < h; row += 1) {
       const base = row * W;
-      for (let x = 0; x < W; x += 1) {
-        const o = (base + x) * 4;
+      for (let x = bx; x < bx + bw; x += 1) {
+        const o = (row * bw + x - bx) * 4;
         const xr = clampX(x - shift - split);
         const xg = clampX(x - shift);
         const xb = clampX(x - shift + split);
@@ -324,6 +459,6 @@ export class CollageRenderer {
         d[o + 3] = 255;
       }
     }
-    this.octx.putImageData(dst, 0, y);
+    this.octx.putImageData(dst, bx, y);
   }
 }
