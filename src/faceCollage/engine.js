@@ -1,8 +1,10 @@
 /**
- * Frame loop: camera (or photo) -> mirrored frame canvas -> landmarks on a small detect canvas
- * -> smoothed face frame -> tracking state -> collage renderer. Owns no camera stream itself;
- * the UI opens and stops the stream so the camera light always follows the Stop button.
+ * Frame loop: camera (or photo) -> landmarks on a small detect canvas -> smoothed face frame
+ * -> tracking state + Expression Frame Bank -> WebGL2 GPU collage renderer.
+ * Owns no camera stream itself; the UI opens and stops the stream so the camera light always
+ * follows the Stop button.
  */
+import { ExpressionBank } from './frameBank.js';
 import { CollageRenderer } from './renderer.js';
 import { OneEuro, arrayToFrame, frameToArray, measureFace, toPixel, toPixels } from './faceFrame.js';
 import { arrayToFeatures, featuresToArray } from './features.js';
@@ -13,6 +15,7 @@ const MAX_OUT_SIDE = 960; // output canvas long side (perf on mid phones)
 const DETECT_WIDTH = 480;
 const SLOW_DETECT_MS = 20; // above this, detect every other frame
 const EYE_BAND_IOD = 0.3;
+const NOSE_BAND_V = [0.22, 0.85];
 const FPS_WINDOW_MS = 1000;
 const TIMELINE_MAX = 400;
 
@@ -34,18 +37,20 @@ export class CollageEngine {
     this.reducedMotion = reducedMotion;
     this.onPhase = onPhase;
     this.renderer = new CollageRenderer(canvas);
-    this.frameCanvas = document.createElement('canvas');
-    this.fctx = this.frameCanvas.getContext('2d', { willReadFrequently: true }); // CPU: the renderer layers read it every frame
+    this.bank = new ExpressionBank();
+    // Small detect canvas only (480px); WebGL2 samples source directly with shader mirroring.
     this.detectCanvas = document.createElement('canvas');
     this.dctx = this.detectCanvas.getContext('2d', { willReadFrequently: false });
     this.frameFilter = new OneEuro({ minCutoff: 1.2, beta: 0.03 });
     this.featureFilter = new OneEuro({ minCutoff: 1.0, beta: 0.02 });
-    this.params = { seed: 1, counts: { eye: 6, nose: 0, mouth: 3, cheek: 0 }, glitch: 0.3 };
+    this.params = { seed: 1, counts: { eye: 6, nose: 0, mouth: 3, cheek: 0 }, glitch: 0.3, bank: false };
     this.layout = makeLayout(this.params);
     this.source = null;
     this.isStill = false;
     this.stillFace = null;
     this.mirror = false;
+    this.outWidth = 2;
+    this.outHeight = 2;
     this.raf = 0;
     this.running = false;
     this.face = null;
@@ -55,14 +60,43 @@ export class CollageEngine {
     this.bands = [];
   }
 
-  setParams({ seed, counts, glitch }) {
-    const next = { ...this.params, ...(seed !== undefined && { seed }), ...(counts && { counts: { ...counts } }), ...(glitch !== undefined && { glitch }) };
+  bankOpts() {
+    return { enabled: Boolean(this.params.bank), isStill: this.isStill, reducedMotion: this.reducedMotion };
+  }
+
+  /** High-key magazine-scan grade runs on Default/Ref/Custom, off on Minimal (pure flatten test Q1/Q2). */
+  gradeAmount() {
+    const { counts, glitch } = this.params;
+    const isMinimal = counts.eye === 2 && counts.nose === 0 && counts.mouth === 1 && (counts.cheek ?? 0) === 0 && glitch === 0;
+    return isMinimal ? 0 : 1;
+  }
+
+  setParams({ seed, counts, glitch, bank }) {
+    const next = {
+      ...this.params,
+      ...(seed !== undefined && { seed }),
+      ...(counts && { counts: { ...counts } }),
+      ...(glitch !== undefined && { glitch }),
+      ...(bank !== undefined && { bank: Boolean(bank) }),
+    };
     const layoutChanged = next.seed !== this.params.seed || JSON.stringify(next.counts) !== JSON.stringify(this.params.counts);
+    const bankToggled = next.bank !== this.params.bank;
     this.params = next;
+    if (bankToggled && !next.bank) {
+      this.bank.clear();
+      this.renderer.clearBank();
+    }
     if (layoutChanged) {
       this.layout = makeLayout(next);
       // While holding, the frozen collage must still show the new layout.
-      if (this.face && this.tracking.phase === 'holding') this.renderer.drawCollage(this.frameCanvas, this.face, this.layout, next.seed, now(), this.reducedMotion);
+      if (this.face && this.tracking.phase === 'holding' && this.source) {
+        this.renderer.drawCollage(this.source, this.face, this.layout, next.seed, now(), this.reducedMotion, {
+          mirror: this.mirror,
+          bank: this.bank,
+          bankUpdates: [],
+          bankOpts: this.bankOpts(),
+        });
+      }
     }
   }
 
@@ -72,14 +106,16 @@ export class CollageEngine {
     this.source = source;
     this.isStill = typeof HTMLImageElement !== 'undefined' && source instanceof HTMLImageElement;
     this.stillFace = null;
-    this.mirror = mirror;
+    this.mirror = Boolean(mirror);
     const { w, h } = sourceSize(source);
     const out = fitSize(w, h);
-    this.frameCanvas.width = out.width;
-    this.frameCanvas.height = out.height;
+    this.outWidth = out.width;
+    this.outHeight = out.height;
     this.detectCanvas.width = DETECT_WIDTH;
-    this.detectCanvas.height = Math.round((DETECT_WIDTH * out.height) / out.width);
+    this.detectCanvas.height = Math.max(2, Math.round((DETECT_WIDTH * out.height) / out.width));
     this.renderer.resize(out.width, out.height);
+    this.bank.clear();
+    this.renderer.clearBank();
     this.frameFilter.reset();
     this.featureFilter.reset();
     this.face = null;
@@ -95,6 +131,13 @@ export class CollageEngine {
     cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.source = null;
+    this.bank.clear();
+    this.renderer.clearBank();
+  }
+
+  dispose() {
+    this.stop();
+    this.renderer.dispose();
   }
 
   /** `t` is the frame time the state machine used, so logged gaps match HOLD_MS exactly. */
@@ -114,11 +157,11 @@ export class CollageEngine {
     this.raf = requestAnimationFrame(this.tick);
   };
 
-  drawFrame() {
-    const { fctx, frameCanvas: c } = this;
-    fctx.setTransform(this.mirror ? -1 : 1, 0, 0, 1, this.mirror ? c.width : 0, 0);
-    fctx.drawImage(this.source, 0, 0, c.width, c.height);
-    fctx.setTransform(1, 0, 0, 1, 0, 0);
+  drawDetectFrame() {
+    const { dctx, detectCanvas: c } = this;
+    dctx.setTransform(this.mirror ? -1 : 1, 0, 0, 1, this.mirror ? c.width : 0, 0);
+    dctx.drawImage(this.source, 0, 0, c.width, c.height);
+    dctx.setTransform(1, 0, 0, 1, 0, 0);
   }
 
   detect(t) {
@@ -128,14 +171,14 @@ export class CollageEngine {
       s.skipNext = false;
       return undefined; // no new result this frame
     }
-    this.dctx.drawImage(this.frameCanvas, 0, 0, this.detectCanvas.width, this.detectCanvas.height);
+    this.drawDetectFrame();
     const t0 = now();
     const lm = this.tracker.detect(this.detectCanvas, t);
     s.detectMs = now() - t0;
     s.skipNext = s.detectMs > SLOW_DETECT_MS;
     if (!lm) return null;
-    // The detect canvas is already mirrored, so landmarks map straight onto the frame canvas.
-    const measured = measureFace(toPixels(lm, this.frameCanvas.width, this.frameCanvas.height, false));
+    // The detect canvas is already mirrored, so landmarks map straight onto output pixels.
+    const measured = measureFace(toPixels(lm, this.outWidth, this.outHeight, false));
     if (this.isStill && measured) this.stillFace = measured;
     return measured;
   }
@@ -145,12 +188,11 @@ export class CollageEngine {
     const sec = t / 1000;
     const frame = arrayToFrame(this.frameFilter.filter(frameToArray(raw.frame), sec));
     const features = arrayToFeatures(this.featureFilter.filter(featuresToArray(raw.features), sec));
-    return { frame, features, oval: raw.oval };
+    return { frame, features, oval: raw.oval, contours: raw.contours, expressions: raw.expressions };
   }
 
   step(t) {
     if (!this.source) return;
-    this.drawFrame();
     const raw = this.detect(t);
     if (raw !== undefined) {
       const before = this.tracking.phase;
@@ -160,30 +202,67 @@ export class CollageEngine {
       }
       this.tracking = stepTracking(this.tracking, { face: raw, now: t });
       if (raw) this.face = this.smooth(raw, t);
-      if (this.tracking.phase !== before) this.setPhase(this.tracking.phase, t);
+      if (this.tracking.phase !== before) {
+        if (this.tracking.phase === 'lost') {
+          this.bank.clear();
+          this.renderer.clearBank();
+        }
+        this.setPhase(this.tracking.phase, t);
+      }
     } else if (this.tracking.phase === 'holding') {
       this.tracking = stepTracking(this.tracking, { face: null, now: t });
-      if (this.tracking.phase !== 'holding') this.setPhase(this.tracking.phase, t);
+      if (this.tracking.phase !== 'holding') {
+        if (this.tracking.phase === 'lost') {
+          this.bank.clear();
+          this.renderer.clearBank();
+        }
+        this.setPhase(this.tracking.phase, t);
+      }
     }
+
     const r0 = now();
     const { seed, glitch } = this.params;
+    const bankOpts = this.bankOpts();
     if (this.tracking.phase === 'tracking' && this.face) {
-      this.renderer.drawCollage(this.frameCanvas, this.face, this.layout, seed, t, this.reducedMotion);
+      const bankUpdates = this.bank.update(this.face, t, bankOpts);
+      this.renderer.drawCollage(this.source, this.face, this.layout, seed, t, this.reducedMotion, {
+        mirror: this.mirror,
+        bank: this.bank,
+        bankUpdates,
+        bankOpts,
+      });
     }
     const alpha = collageAlpha(this.tracking, t, this.reducedMotion);
-    this.bands = this.renderer.compose(this.frameCanvas, { alpha, seed, glitch, now: t, reducedMotion: this.reducedMotion, avoidRows: this.eyeRows(), face: this.face ? { cx: this.face.frame.ox, iod: this.face.frame.iod } : null });
+    this.bands = this.renderer.compose(this.source, {
+      alpha,
+      seed,
+      glitch,
+      now: t,
+      reducedMotion: this.reducedMotion,
+      avoidRows: this.protectedRows(),
+      face: this.face ? { cx: this.face.frame.ox, iod: this.face.frame.iod } : null,
+      mirror: this.mirror,
+      gradeAmt: this.gradeAmount(),
+    });
     this.stats.renderMs = now() - r0;
     this.countFps(t);
   }
 
-  eyeRows() {
+  /** Protects kept eyes AND the 2-tier nose band from stray full-width glitch bands (QA R4 R11). */
+  protectedRows() {
     if (!this.face) return [];
     const { frame, features } = this.face;
-    return ['eyeA', 'eyeB'].map((k) => {
+    const rows = ['eyeA', 'eyeB'].map((k) => {
       const y = toPixel(frame, features[k]).y;
       const half = EYE_BAND_IOD * frame.iod;
       return [y - half, y + half];
     });
+    if (this.params.counts.nose > 0) {
+      const y0 = toPixel(frame, { u: 0, v: NOSE_BAND_V[0] }).y;
+      const y1 = toPixel(frame, { u: 0, v: NOSE_BAND_V[1] }).y;
+      rows.push([Math.min(y0, y1), Math.max(y0, y1)]);
+    }
+    return rows;
   }
 
   countFps(t) {
@@ -199,11 +278,13 @@ export class CollageEngine {
 
   /** Read-only state for the debug HUD and the e2e tests (window.__faceCollage). */
   snapshot() {
+    const t = now();
     const { fps, detectMs, renderMs, frames } = this.stats;
     const counts = this.layout.reduce((acc, p) => ({ ...acc, [p.kind]: (acc[p.kind] ?? 0) + 1 }), {});
     return {
+      renderer: this.renderer.backend,
       phase: this.tracking.phase,
-      alpha: collageAlpha(this.tracking, now(), this.reducedMotion),
+      alpha: collageAlpha(this.tracking, t, this.reducedMotion),
       timeline: this.timeline.slice(),
       fps: Math.round(fps * 10) / 10,
       detectMs: Math.round(detectMs * 10) / 10,
@@ -213,9 +294,21 @@ export class CollageEngine {
       delegate: this.tracker.delegate,
       seed: this.params.seed,
       glitch: this.params.glitch,
+      bankEnabled: Boolean(this.params.bank),
+      bank: this.bank.summary(t, this.face?.expressions ?? null),
       bands: this.bands.length,
       counts,
-      patches: this.layout.map(({ id, kind, u, v, scale, rot }) => ({ id, kind, u, v, scale, rot })),
+      patches: this.layout.map(({ id, kind, u, v, scale, rot, mask, expr, cut }) => ({
+        id,
+        kind,
+        u,
+        v,
+        scale,
+        rot,
+        mask,
+        expr,
+        hard: cut?.hard ?? [],
+      })),
       face: this.face ? { iod: Math.round(this.face.frame.iod), ox: Math.round(this.face.frame.ox), oy: Math.round(this.face.frame.oy) } : null,
       size: { width: this.canvas.width, height: this.canvas.height },
     };

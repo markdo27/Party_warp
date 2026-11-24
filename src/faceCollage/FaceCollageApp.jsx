@@ -42,6 +42,7 @@ export default function FaceCollageApp() {
   const [preset, setPreset] = useState('default');
   const [counts, setCounts] = useState(PRESETS.default.counts);
   const [glitch, setGlitch] = useState(PRESETS.default.glitch);
+  const [bank, setBank] = useState(PRESETS.default.bank);
   const [seed, setSeed] = useState(INITIAL_SEED);
   const [seedText, setSeedText] = useState(seedToText(INITIAL_SEED));
   const [cameras, setCameras] = useState([]);
@@ -121,9 +122,9 @@ export default function FaceCollageApp() {
           stopStream(stream);
           return undefined;
         }
-        console.error('[face-collage] model failed', err);
+        console.error('[face-collage] model or renderer failed', err);
         releaseCamera();
-        return fail('model-error');
+        return fail(String(err?.message).includes('WebGL2') ? 'webgl2' : 'model-error');
       }
       if (sessionRef.current !== runId || streamRef.current !== stream) {
         stopStream(stream);
@@ -179,7 +180,8 @@ export default function FaceCollageApp() {
       } catch (err) {
         if (sessionRef.current !== runId) return;
         console.error('[face-collage] photo failed', err);
-        fail(trackerRef.current ? 'photo-error' : 'model-error');
+        if (String(err?.message).includes('WebGL2')) fail('webgl2');
+        else fail(trackerRef.current ? 'photo-error' : 'model-error');
       } finally {
         URL.revokeObjectURL(url);
       }
@@ -203,6 +205,7 @@ export default function FaceCollageApp() {
       document.removeEventListener('visibilitychange', onHide);
       window.removeEventListener('pagehide', releaseCamera);
       releaseCamera();
+      engineRef.current?.dispose();
       trackerRef.current?.close();
       trackerRef.current = null;
       engineRef.current = null;
@@ -210,8 +213,8 @@ export default function FaceCollageApp() {
   }, [releaseCamera, stopAll]);
 
   useEffect(() => {
-    engineRef.current?.setParams({ seed, counts, glitch });
-  }, [seed, counts, glitch, screen]);
+    engineRef.current?.setParams({ seed, counts, glitch, bank });
+  }, [seed, counts, glitch, bank, screen]);
 
   useEffect(() => {
     window.__faceCollage = {
@@ -231,6 +234,7 @@ export default function FaceCollageApp() {
     setPreset(key);
     setCounts(PRESETS[key].counts);
     setGlitch(PRESETS[key].glitch);
+    setBank(Boolean(PRESETS[key].bank));
   };
   const setCount = (kind, value) => {
     setPreset('custom');
@@ -357,6 +361,10 @@ export default function FaceCollageApp() {
               {Object.entries(PRESETS).map(([k, p]) => <option key={k} value={k}>{p.label}</option>)}
               {preset === 'custom' && <option value="custom">Custom</option>}
             </select>
+          </label>
+          <label className="fc-check" htmlFor="fc-bank">
+            <input id="fc-bank" type="checkbox" checked={bank} onChange={(e) => { setPreset('custom'); setBank(e.target.checked); }} data-testid="fc-bank" />
+            <span>Expression memory</span>
           </label>
           {COUNT_KEYS.map(([kind, label]) => (
             <label key={kind} className="fc-field" htmlFor={`fc-count-${kind}`}>

@@ -3,7 +3,7 @@
  * unit = inter-ocular distance (IOD). Every patch is placed in this frame so the
  * collage follows the head (move, roll, zoom) without re-randomising.
  */
-import { FACE_OVAL, IRIS_A, IRIS_B, LANDMARK_COUNT, measureFeatures } from './features.js';
+import { FACE_OVAL, IRIS_A, IRIS_B, LANDMARK_COUNT, measureContours, measureExpressions, measureFeatures } from './features.js';
 
 /** Landmarks (normalised 0..1) -> pixel points, mirrored for the selfie view when asked. */
 export function toPixels(landmarks, width, height, mirror) {
@@ -44,14 +44,18 @@ export function toPixel(frame, q) {
 /** Canvas transform [a, b, c, d, e, f] that draws face units into pixels. */
 export const frameMatrix = (f) => [f.ax * f.iod, f.ay * f.iod, -f.ay * f.iod, f.ax * f.iod, f.ox, f.oy];
 
-/** Frame + features in one step, or null when there is no usable face. */
+/** Frame + features + organic contours + expressions in one step, or null when there is no usable face. */
 export function measureFace(lm) {
   const frame = frameFromLandmarks(lm);
   if (!frame) return null;
+  const map = (p) => toFace(frame, p);
+  const features = measureFeatures(lm, map, frame.iod);
   return {
     frame,
-    features: measureFeatures(lm, (p) => toFace(frame, p), frame.iod),
-    oval: FACE_OVAL.map((i) => toFace(frame, lm[i])),
+    features,
+    oval: FACE_OVAL.map((i) => map(lm[i])),
+    contours: measureContours(lm, map, features),
+    expressions: measureExpressions(lm, map, frame.iod),
   };
 }
 

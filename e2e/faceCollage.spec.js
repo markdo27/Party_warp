@@ -92,7 +92,7 @@ test('camera: tracks, follows the face, survives loss, stops the camera', async 
     g.drawImage(video, 0, 0, c.width, c.height);
     const box = [c.width * 0.3, c.height * 0.25, c.width * 0.4, c.height * 0.6];
     const raw = g.getImageData(...box).data;
-    const o = out.getContext('2d').getImageData(...box).data;
+    const oc = document.createElement('canvas'); oc.width = out.width; oc.height = out.height; const og = oc.getContext('2d', { willReadFrequently: true }); og.drawImage(out, 0, 0); const o = og.getImageData(...box).data;
     let sum = 0;
     for (let i = 0; i < raw.length; i += 4) sum += Math.abs(raw[i] - o[i]) + Math.abs(raw[i + 1] - o[i + 1]) + Math.abs(raw[i + 2] - o[i + 2]);
     return sum / (raw.length / 4) / 3;

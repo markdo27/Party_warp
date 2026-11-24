@@ -2,11 +2,14 @@
  * Collage layout: seed + counts -> list of patches placed in the face frame
  * (u right, v down, 1 = inter-ocular distance). Pure and deterministic.
  *
- * Round 3 (ref match): copies sit on a fixed slot table measured from the reference
- * (ref-match guide, section 3) with a small seeded jitter, instead of free scatter.
- * Counts include the kept originals (2 eyes, 1 mouth). Each patch has its own PRNG stream,
- * so raising or lowering a count never moves the others.
- * `cheek` patches are edge slices: horizontal strips of the face edge pushed outwards.
+ * Round 5 architecture:
+ *   - Organic landmark-contoured masks (`mask: 'organic-eye' | 'organic-nose' | 'organic-mouth'`)
+ *     replace rectangular horizontal planks, eliminating the "venetian blind" artifact (QA R4 R6/R12)
+ *     while keeping selective crisp collage cut seams (`cut`).
+ *   - Only the top forehead eye row (`brow: true`) carries the eyebrow arch (matching `image.png`);
+ *     lower stacked eyes use tight orbital almond contours so every iris remains unobstructed!
+ *   - Semantic expression roles (`expr`) map copies to the Expression Frame Bank (R10) while kept
+ *     originals (eyeA, eyeB, mouth) stay 100% live and the original nose remains hidden.
  */
 import { hashSeed, mulberry32, range } from './prng.js';
 
@@ -18,67 +21,74 @@ export const COUNT_LIMITS = {
 };
 
 export const PRESETS = {
-  default: { label: 'Default', counts: { eye: 6, nose: 0, mouth: 3, cheek: 0 }, glitch: 0.3 },
-  ref: { label: 'Ref', counts: { eye: 10, nose: 4, mouth: 7, cheek: 6 }, glitch: 0.6 },
-  minimal: { label: 'Minimal', counts: { eye: 2, nose: 0, mouth: 1, cheek: 0 }, glitch: 0 },
+  default: { label: 'Default', counts: { eye: 6, nose: 0, mouth: 3, cheek: 0 }, glitch: 0.3, bank: false },
+  ref: { label: 'Ref', counts: { eye: 10, nose: 4, mouth: 7, cheek: 6 }, glitch: 0.6, bank: true },
+  minimal: { label: 'Minimal', counts: { eye: 2, nose: 0, mouth: 1, cheek: 0 }, glitch: 0, bank: false },
 };
 
-/** Slot table from the reference, in the order copies are added (removed in reverse). */
+/** Slot table calibrated to `image.png` (`ref-measure.json`), in the order copies are added. */
 export const SLOTS = {
   eye: [
-    { u: -0.43, v: -0.72, scale: 1.12 },
-    { u: 0.41, v: -0.74, scale: 1.12 },
-    { u: -0.69, v: -0.47, scale: 1.18 },
-    { u: 0.01, v: -0.49, scale: 1.24 },
-    { u: 0.65, v: -0.42, scale: 1.18 },
-    { u: -0.02, v: -0.2, scale: 1.18 },
-    { u: -0.71, v: 0.21, scale: 1.12, flipX: true },
-    { u: 0.67, v: 0.27, scale: 1.12, flipX: true },
+    // Row 1 (top forehead): keeps brow arch like ref!
+    { u: -0.4, v: -0.74, scale: 1.06, expr: 'eyeDelay', brow: true },
+    { u: 0.42, v: -0.76, scale: 1.08, expr: 'eyeWide', brow: true },
+    // Row 2: tight orbital almond contours so all irises stay 100% crisp and unobstructed
+    { u: -0.66, v: -0.45, scale: 1.08, expr: 'eyeDelay' },
+    { u: 0.02, v: -0.46, scale: 1.12, expr: 'eyeWide' },
+    { u: 0.64, v: -0.42, scale: 1.08, expr: 'eyeWide' },
+    // Row 3: staggered middle eye nestled cleanly above upper noses
+    { u: -0.16, v: -0.22, scale: 1.08, expr: 'eyeWide' },
+    // Row 4: side-glancing left eye + closed right eye flanking the upper noses (clear of orig eyes)
+    { u: -0.68, v: 0.27, scale: 1.02, flipX: true, expr: 'eyeGaze' },
+    { u: 0.66, v: 0.29, scale: 1.02, flipX: false, expr: 'eyeClosed' },
   ],
   nose: [
-    { u: -0.35, v: 0.36, scale: 1.15 },
-    { u: 0.15, v: 0.36, scale: 1.15 },
-    { u: -0.38, v: 0.66, scale: 1.2 },
-    { u: 0.2, v: 0.66, scale: 1.2 },
+    // Two unmistakably separated tiers: compact bridge-to-nostril crops so tier 2 never hides tier 1's nostrils!
+    { u: -0.26, v: 0.28, scale: 1.04 },
+    { u: 0.19, v: 0.28, scale: 1.04 },
+    { u: -0.3, v: 0.64, scale: 1.1 },
+    { u: 0.21, v: 0.64, scale: 1.1 },
   ],
   mouth: [
-    { u: -0.45, v: 1.09, scale: 0.95 },
-    { u: -0.07, v: 1.74, scale: 1.35 },
-    { u: -0.8, v: 1.46, scale: 1.3 },
-    { u: 0.62, v: 1.46, scale: 1.2 },
-    { u: 0.43, v: 1.03, scale: 0.9 },
-    { u: 0.47, v: 2.17, scale: 1.15 },
+    { u: -0.42, v: 1.04, scale: 0.94, expr: 'mouthClosed' },
+    { u: -0.06, v: 1.72, scale: 1.36, expr: 'mouthOpen' },
+    { u: -0.72, v: 1.46, scale: 1.3, expr: 'mouthOpen' },
+    { u: 0.58, v: 1.42, scale: 1.24, expr: 'mouthSmile', hardEdge: 'top' },
+    { u: 0.42, v: 1.01, scale: 0.88, expr: 'mouthClosed' },
+    { u: 0.44, v: 2.16, scale: 1.16, expr: 'mouthOpen' },
   ],
 };
 
 /** Zones: slots and extra copies (beyond the table) keep their centre inside. */
 export const ZONES = {
-  eye: { u: [-0.85, 0.85], v: [-0.9, 0.45], scale: [1.1, 1.25], rot: 6 },
-  nose: { u: [-0.55, 0.55], v: [0.25, 0.85], scale: [1.05, 1.2], rot: 6 },
-  mouth: { u: [-0.9, 0.9], v: [0.9, 2.3], scale: [0.9, 1.3], rot: 8 },
+  eye: { u: [-0.8, 0.8], v: [-0.85, 0.4], scale: [1.0, 1.2], rot: 6 },
+  nose: { u: [-0.55, 0.55], v: [0.25, 0.85], scale: [1.0, 1.16], rot: 5 },
+  mouth: { u: [-0.85, 0.85], v: [0.9, 2.3], scale: [0.88, 1.36], rot: 8 },
   cheek: { u: [-1.45, 1.45], v: [0.3, 1.7], rot: 0 },
 };
 
-const JITTER = { pos: 0.06, scale: 0.08 };
-/** Upscale cap per kind after jitter: a 1.6x+ mouth from a small source went blurry (QA R3, guide max 1.6). */
-const MAX_SCALE = { eye: 1.3, nose: 1.3, mouth: 1.4 };
+const JITTER = { pos: 0.045, scale: 0.065 };
+/** Upscale cap per kind after jitter (guide ceiling 1.6; 1.4 keeps lips/teeth sharp). */
+const MAX_SCALE = { eye: 1.25, nose: 1.25, mouth: 1.4 };
 const SALT = { eye: 11, nose: 23, mouth: 37, cheek: 53 };
 const EDGES = ['top', 'right', 'bottom', 'left'];
-const HARD_SKEW_DEG = [5, 20];
-const HARD_SKEW_SHARE = 0.45;
+const HARD_SKEW_DEG = [10, 24];
+const HARD_SKEW_SHARE = 0.8;
 const FLIP_SHARE = 0.25;
-const NOSE_DEEPEN = 0.25;
-/** Edge slices (guide section 5). */
-const SLICE = { h: [0.08, 0.35], shift: [0.1, 0.3], src: [0.72, 0.95], v: [0.3, 1.7], len: [0.35, 0.6] };
-/** Heavy side gets about 2/3 of the slices: H H L H L H. */
+const NOSE_DEEPEN = 0.28;
+/** Edge slices (ref-match guide section 5). */
+const SLICE = { h: [0.09, 0.3], shift: [0.12, 0.28], src: [0.74, 0.95], v: [0.32, 1.65], len: [0.34, 0.58], outerDeg: [20, 38] };
+/** Heavy side gets 2/3 of slices: H H L H L H (4 vs 2 in Ref preset). */
 const SLICE_SIDES = [1, 1, 0, 1, 0, 1];
 
-/** Where the kept originals sit on an average face (QA overlays only). */
+/** Where the kept originals sit on an average face (QA overlays only; renderer uses live landmarks). */
 const ORIGINALS = [
-  { kind: 'eye', source: 'eyeA', u: -0.5, v: -0.08 },
-  { kind: 'eye', source: 'eyeB', u: 0.5, v: -0.08 },
+  { kind: 'eye', source: 'eyeA', u: -0.5, v: -0.02 },
+  { kind: 'eye', source: 'eyeB', u: 0.5, v: -0.02 },
   { kind: 'mouth', source: 'mouth', u: 0, v: 1.05 },
 ];
+
+const MASK_FOR = { eye: 'organic-eye', nose: 'organic-nose', mouth: 'organic-mouth', cheek: 'slice' };
 
 export const clampCount = (kind, n) => {
   const { min, max } = COUNT_LIMITS[kind];
@@ -89,30 +99,58 @@ export const clampCount = (kind, n) => {
 const clamp = (x, [lo, hi]) => Math.min(hi, Math.max(lo, x));
 
 /**
- * 1 or 2 hard (cut) edges per patch; the rest are feathered into the layer below (guide section 4).
- * 70% of first hard edges are top/bottom; the first hard edge may be slanted.
- * Eye copies only cut top/bottom so their sides melt into the copies next to them.
+ * Eye organic patches: 1 selective angled collage cut chord along the outer skin rim
+ * (`chord 0.80..0.93`), never cutting into the iris or forming repeating horizontal blinds.
  */
-/**
- * Eye copies: exactly one hard edge, alternating top / bottom by index, so stacked eyes do not
- * read as repeated horizontal stripes (QA R3 R6). Mouths: one hard edge, mostly a slanted side
- * cut, so neighbouring mouths blend into a wave instead of slats.
- */
-export function eyeCut(rand, i) {
-  const edge = i % 2 ? 'bottom' : 'top';
+export function eyeCut(rand, i, forcedEdge = null) {
+  const edge = forcedEdge ?? (i % 2 ? 'bottom' : 'top');
   const skew = rand() < HARD_SKEW_SHARE;
-  return { kind: skew ? 'skew' : 'rect', edge, angle: skew ? range(rand, HARD_SKEW_DEG[0], HARD_SKEW_DEG[1]) : 0, hard: [edge] };
+  const sign = rand() < 0.5 ? -1 : 1;
+  const angle = skew ? range(rand, HARD_SKEW_DEG[0], HARD_SKEW_DEG[1]) : 0;
+  return {
+    kind: skew ? 'skew' : 'rect',
+    edge,
+    angle,
+    signedAngle: sign * angle,
+    chord: range(rand, 0.8, 0.93),
+    hard: [edge],
+  };
 }
 
-export function mouthCut(rand) {
+export function noseCut(rand) {
+  const skew = rand() < 0.7;
+  const sign = rand() < 0.5 ? -1 : 1;
+  const angle = skew ? range(rand, 4, 14) : 0;
+  return {
+    kind: skew ? 'skew' : 'rect',
+    edge: 'bottom',
+    angle,
+    signedAngle: sign * angle,
+    // Crisp paper-cut seam just below the nostrils so tier 1 reads sharply above tier 2.
+    chord: range(rand, 0.82, 0.92),
+    hard: ['bottom'],
+  };
+}
+
+export function mouthCut(rand, forcedEdge = null) {
   const r = rand();
-  const edge = r < 0.35 ? 'left' : r < 0.7 ? 'right' : r < 0.85 ? 'top' : 'bottom';
-  const skew = rand() < 0.6;
-  return { kind: skew ? 'skew' : 'rect', edge, angle: skew ? range(rand, HARD_SKEW_DEG[0], HARD_SKEW_DEG[1]) : 0, hard: [edge] };
+  const edge = forcedEdge ?? (r < 0.36 ? 'left' : r < 0.72 ? 'right' : r < 0.86 ? 'top' : 'bottom');
+  const skew = forcedEdge === 'top' ? rand() < 0.3 : rand() < 0.75;
+  const sign = rand() < 0.5 ? -1 : 1;
+  const angle = skew ? range(rand, HARD_SKEW_DEG[0], HARD_SKEW_DEG[1]) : 0;
+  return {
+    kind: skew ? 'skew' : 'rect',
+    edge,
+    angle,
+    signedAngle: sign * angle,
+    // Stays in the skin rim outside the vermilion lip (including M5's signature ref upper-cheek cut).
+    chord: forcedEdge === 'top' ? range(rand, 0.82, 0.9) : range(rand, 0.85, 0.94),
+    hard: [edge],
+  };
 }
 
-// Noses: one slanted top/bottom cut so the two tiers read as stacked noses, not boxes.
-const cutFor = (kind, rand, i) => (kind === 'eye' || kind === 'nose' ? eyeCut(rand, i) : kind === 'mouth' ? mouthCut(rand) : makeCut(rand, EDGES));
+const cutFor = (kind, rand, i, forcedEdge = null) =>
+  kind === 'eye' ? eyeCut(rand, i, forcedEdge) : kind === 'nose' ? noseCut(rand) : kind === 'mouth' ? mouthCut(rand, forcedEdge) : makeCut(rand, EDGES);
 
 export function makeCut(rand, allowed = EDGES) {
   const sides = allowed.filter((e) => e === 'left' || e === 'right');
@@ -124,20 +162,33 @@ export function makeCut(rand, allowed = EDGES) {
     hard.push(others[Math.floor(rand() * others.length)]);
   }
   const skew = rand() < HARD_SKEW_SHARE;
-  return { kind: skew ? 'skew' : 'rect', edge: first, angle: skew ? range(rand, HARD_SKEW_DEG[0], HARD_SKEW_DEG[1]) : 0, hard };
+  const angle = skew ? range(rand, HARD_SKEW_DEG[0], HARD_SKEW_DEG[1]) : 0;
+  return { kind: skew ? 'skew' : 'rect', edge: first, angle, signedAngle: angle, chord: 0.86, hard };
 }
 
 function slotOrExtra(kind, i, rand) {
   const slot = SLOTS[kind]?.[i];
   const z = ZONES[kind];
   if (!slot) {
-    return { u: range(rand, z.u[0], z.u[1]), v: range(rand, z.v[0], z.v[1]), scale: range(rand, z.scale[0], z.scale[1]), flipX: null };
+    const extraExpr = kind === 'eye' ? 'eyeDelay' : kind === 'mouth' ? 'mouthDelay' : 'live';
+    return {
+      u: range(rand, z.u[0], z.u[1]),
+      v: range(rand, z.v[0], z.v[1]),
+      scale: range(rand, z.scale[0], z.scale[1]),
+      flipX: null,
+      expr: extraExpr,
+      brow: false,
+      hardEdge: null,
+    };
   }
   return {
     u: clamp(slot.u + range(rand, -JITTER.pos, JITTER.pos), z.u),
     v: clamp(slot.v + range(rand, -JITTER.pos, JITTER.pos), z.v),
     scale: Math.min(MAX_SCALE[kind] ?? Infinity, slot.scale * (1 + range(rand, -JITTER.scale, JITTER.scale))),
     flipX: slot.flipX ?? null,
+    expr: slot.expr ?? 'live',
+    brow: Boolean(slot.brow),
+    hardEdge: slot.hardEdge ?? null,
   };
 }
 
@@ -151,6 +202,9 @@ function placeCopies(kind, seed, total) {
     out.push({
       id: `${kind}-${i}`,
       kind,
+      mask: MASK_FOR[kind],
+      expr: pos.expr,
+      brow: pos.brow,
       original: false,
       source,
       u: pos.u,
@@ -158,16 +212,15 @@ function placeCopies(kind, seed, total) {
       scale: pos.scale,
       rot: range(attr, -ZONES[kind].rot, ZONES[kind].rot),
       flipX,
-      cut: cutFor(kind, attr, i),
-      shade: kind === 'nose' ? range(attr, -0.04, 0) : range(attr, -0.05, 0.05),
-      // Noses read too pale against the lifted skin (QA R3): deepen nostrils and tip shadow.
+      cut: cutFor(kind, attr, i, pos.hardEdge),
+      shade: kind === 'nose' ? range(attr, -0.045, -0.005) : range(attr, -0.04, 0.04),
       deepen: kind === 'nose' ? NOSE_DEEPEN : 0,
     });
   }
   return out;
 }
 
-/** Edge slices: a strip of the finished collage at the face edge (srcU), pushed outwards by `shift`. */
+/** Edge slices: a hard-cut angled strip of the finished collage at the face edge pushed outwards. */
 function placeSlices(seed, total) {
   const heavy = mulberry32(hashSeed(seed, 4242))() < 0.5 ? -1 : 1;
   const out = [];
@@ -176,9 +229,13 @@ function placeSlices(seed, total) {
     const side = SLICE_SIDES[i % SLICE_SIDES.length] ? heavy : -heavy;
     const srcU = side * range(rand, SLICE.src[0], SLICE.src[1]);
     const shift = side * range(rand, SLICE.shift[0], SLICE.shift[1]);
+    const outerAngle = range(rand, SLICE.outerDeg[0], SLICE.outerDeg[1]) * (rand() < 0.5 ? 1 : -1);
     out.push({
       id: `cheek-${i}`,
       kind: 'cheek',
+      mask: MASK_FOR.cheek,
+      expr: 'live',
+      brow: false,
       original: false,
       source: 'slice',
       side,
@@ -191,8 +248,14 @@ function placeSlices(seed, total) {
       scale: 1,
       rot: 0,
       flipX: false,
-      cut: { kind: 'rect', edge: 'top', angle: 0, hard: ['top', 'bottom'] },
-      shade: range(rand, -0.04, 0.04),
+      cut: {
+        kind: 'skew',
+        edge: side > 0 ? 'right' : 'left',
+        angle: Math.abs(outerAngle),
+        signedAngle: outerAngle,
+        hard: ['top', 'bottom'],
+      },
+      shade: range(rand, -0.03, 0.045),
     });
   }
   return out;
@@ -213,14 +276,17 @@ export function makeLayout({ seed, counts }) {
   const originals = ORIGINALS.map((o, i) => ({
     ...o,
     id: `orig-${o.source}`,
+    mask: MASK_FOR[o.kind],
+    expr: 'live',
+    brow: false,
     original: true,
     scale: 1,
     rot: 0,
     flipX: false,
     cut: cutFor(o.kind, mulberry32(hashSeed(seed, 9001 + i)), i),
     shade: 0,
+    deepen: 0,
   }));
-  // Full max-length lists sliced to the count, so changing a count never moves the others.
   const eyes = placeCopies('eye', seed, COUNT_LIMITS.eye.max - 2).slice(0, n.eye - 2);
   const noses = placeCopies('nose', seed, COUNT_LIMITS.nose.max).slice(0, n.nose);
   const mouths = placeCopies('mouth', seed, COUNT_LIMITS.mouth.max - 1).slice(0, n.mouth - 1);
@@ -257,3 +323,35 @@ export function cutPolygon(w, h, cut) {
 
 /** Edges that are not cut hard get feathered. */
 export const softEdges = (cut) => EDGES.filter((e) => !(cut.hard ?? EDGES).includes(e));
+
+/**
+ * Converts a patch's selective hard cut specification into a normalized 2D half-plane
+ * `[nx, ny, dist]` in patch-local face units (`dot(p, n) > dist` is sliced away with <= 1.5 px AA).
+ */
+export function cutHalfPlane(w, h, cut) {
+  if (!cut?.hard?.length) return null;
+  const edge = cut.edge ?? cut.hard[0];
+  const rad = ((cut.signedAngle ?? cut.angle ?? 0) * Math.PI) / 180;
+  const chord = cut.chord ?? 0.85;
+  let nx = 0;
+  let ny = 0;
+  let baseDist = 0;
+  if (edge === 'top') {
+    nx = Math.sin(rad);
+    ny = -Math.cos(rad);
+    baseDist = (h * 0.5) * chord;
+  } else if (edge === 'bottom') {
+    nx = Math.sin(rad);
+    ny = Math.cos(rad);
+    baseDist = (h * 0.5) * chord;
+  } else if (edge === 'left') {
+    nx = -Math.cos(rad);
+    ny = Math.sin(rad);
+    baseDist = (w * 0.5) * chord;
+  } else {
+    nx = Math.cos(rad);
+    ny = Math.sin(rad);
+    baseDist = (w * 0.5) * chord;
+  }
+  return [nx, ny, baseDist];
+}

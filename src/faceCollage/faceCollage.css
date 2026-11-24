@@ -57,6 +57,8 @@ body { background: var(--fc-paper); color: var(--fc-ink); font-family: var(--fc-
 .fc-field span { display: flex; justify-content: space-between; }
 .fc-field output { font-variant-numeric: tabular-nums; color: var(--fc-muted); }
 .fc-field input[type='range'] { width: 100%; height: var(--fc-tap); accent-color: var(--fc-ink); }
+.fc-check { display: flex; align-items: center; gap: var(--fc-space-2); min-height: var(--fc-tap); font-size: 0.875rem; cursor: pointer; }
+.fc-check input[type='checkbox'] { width: 20px; height: 20px; margin: 0; accent-color: var(--fc-ink); cursor: pointer; }
 .fc-field select, .fc-seed { min-height: var(--fc-tap); padding: 0 var(--fc-space-3); border: 1px solid var(--fc-line-strong); border-radius: var(--fc-radius); background: var(--fc-paper); color: var(--fc-ink); font: inherit; }
 .fc-seed { width: 100%; font-family: ui-monospace, monospace; text-transform: lowercase; }
 .fc-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--fc-space-2); }

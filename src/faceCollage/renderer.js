@@ -1,168 +1,374 @@
 /**
- * Canvas 2D renderer for the Face Collage prototype.
- *   1. flatten: replace the face oval with a blurred, brightened skin plate (soft edge, no seam)
- *   2. patches: eye / nose / mouth boxes from the live frame on the ref slot table; 1-2 hard cut edges,
- *      the rest feathered into the layer below (ref-match guide section 4)
- *   3. edge slices: strips of the finished collage at the face edge pushed outwards (guide section 5)
- *   4. tone grade: lift + warm curve inside the face ellipse (guide section 2)
- *   5. compose + glitch: blur fallback while no face, slip bands at the face edges with an R/B split, grain
- * Note: the foundation planned WebGL2; this prototype uses Canvas 2D to ship faster (see report).
+ * Full WebGL2 GPU renderer for Face Collage (foundation D6 + Round 5 architecture).
+ *   Pass 0   : Skin plate (GPU cheek sampling + feature cover + Kawase/Gaussian blur + soft oval mask)
+ *   Pass 0.5 : Expression Frame Bank atlas update (face-aligned 256x256 tiles on GPU, zero readback)
+ *   Pass 1   : Collage composition (organic landmark-contoured masks + selective crisp collage cuts)
+ *   Pass 2   : Angled hard-cut edge slices pushed outward from the finished collage
+ *   Pass 3   : Privacy blur blend + GPU horizontal glitch slip/R-B split + global magazine-scan tone + grain
+ *
+ * Zero per-frame canvas allocations, zero CPU getImageData/readPixels readbacks.
  */
-import { cutPolygon, softEdges } from './layout.js';
-import { frameMatrix, toPixel } from './faceFrame.js';
-import { glitchBands } from './glitch.js';
+import { BANK_COLS, BANK_ROWS, BANK_TILE_SIZE } from './frameBank.js';
+import { ellipseContour } from './features.js';
+import { MAX_GLITCH_BANDS, glitchBands } from './glitch.js';
+import { cutHalfPlane } from './layout.js';
 import { mulberry32 } from './prng.js';
+import { toPixel } from './faceFrame.js';
 import { easeOut } from './trackingState.js';
+import {
+  BANK_CROP_FRAG,
+  BLUR_FRAG,
+  COPY_VIDEO_FRAG,
+  FINAL_FRAG,
+  FULLSCREEN_VERT,
+  PATCH_FRAG,
+  PATCH_VERT,
+  PLATE_COMPOSITE_FRAG,
+  PLATE_SEED_FRAG,
+  POLY_VERT,
+  SLICE_FRAG,
+  SOLID_WHITE_FRAG,
+} from './shaders.js';
 
-const PLATE_GRID = 32; // working size of the skin plate before blurring
-const PLATE_BLUR_GRID = 8; // ~0.35 IOD blur radius on a typical face
-const PLATE_BRIGHTEN = 'rgba(255,248,240,0.10)'; // warm ~+0.25 EV lift
-const FEATHER_IOD = 0.10;
-const PATCH_FEATHER_IOD = 0.12; // soft patch edges; guide says ~0.05 IOD, 0.12 hides the box sides at phone sizes
-const MAX_SCRATCH_PX = 1024;
-/** Tone grade: lift curve y = (1 - e^(-kx)) / (1 - e^(-k)) per channel, then a contrast stretch around `mid`. */
-const GRADE = { k: [1.6, 1.55, 1.0], mid: 150, contrast: 1.45, u0: 0, v0: 0.65, ru: 1.2, rv: 1.7, feather: 0.18, outside: 0.25, outFade: 0.3 };
-const EDGE_INDEX = { top: [0, 1], right: [1, 2], bottom: [2, 3], left: [3, 0] };
-const OVAL_INSET = 1.0; // full face oval so forehead/cheeks flatten cleanly while shadowBlur feathers the edge
-const SEAM_PX = 1;
-const SEAM_COLOR = 'rgba(0,0,0,0.16)';
-const BG_BLUR_DIV = 18;
+const PLATE_SIZE = 64;
+const BG_BLUR_DIV = 16;
 const GRAIN_SIZE = 192;
 const GRAIN_SEED = 0x46434752;
-const GRAIN_ALPHA = 0.08;
+const GRAIN_ALPHA = 0.085;
 const GRAIN_SLOT_MS = 120;
 const ADD_ANIM_MS = 150;
+const FEATHER_IOD = 0.1;
 const COVER = {
-  eye: { w: 1.0, h: 0.8, lift: 0.12 },
-  nose: { w: 0.55, top: 0.05, bottom: 0.85 },
-  mouth: { grow: 1.15 },
+  eye: { w: 1.0, h: 0.82, lift: 0.12 },
+  nose: { w: 0.58, top: 0.04, bottom: 0.86 },
+  mouth: { grow: 1.18 },
+};
+/** Per-kind organic mask feathering (IOD outside anatomical contour) and micro-sharpening. */
+const MASK_STYLE = {
+  eye: { featherTop: 0.095, featherBot: 0.09, sharpen: 0.38 },
+  nose: { featherTop: 0.075, featherBot: 0.022, sharpen: 0.48 },
+  mouth: { featherTop: 0.055, featherBot: 0.058, sharpen: 0.36 },
 };
 
-const make = (w = 1, h = 1) => {
-  const c = document.createElement('canvas');
-  c.width = w;
-  c.height = h;
-  return c;
-};
-const ctx2d = (c, opts) => c.getContext('2d', opts);
-const CPU = { willReadFrequently: true };
-
-function invert([a, b, c, d, e, f]) {
-  const det = a * d - b * c;
-  return [d / det, -b / det, -c / det, a / det, (c * f - d * e) / det, (b * e - a * f) / det];
-}
-
-function pathPoly(ctx, pts) {
-  ctx.beginPath();
-  pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-  ctx.closePath();
-}
-
-/** Pixel bounding box (plus margin) of a w x h face-unit box centred at u, v; clamped to the canvas. */
-function pixelBox(F, u, v, w, h, canvas) {
-  const [a, b, c, d, e, f] = F;
-  const xs = [];
-  const ys = [];
-  for (const [du, dv] of [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]]) {
-    xs.push(a * (u + du) + c * (v + dv) + e);
-    ys.push(b * (u + du) + d * (v + dv) + f);
+function compileShader(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(sh);
+    gl.deleteShader(sh);
+    throw new Error(`WebGL2 shader error: ${log}`);
   }
-  const x0 = Math.max(0, Math.floor(Math.min(...xs)) - 2);
-  const y0 = Math.max(0, Math.floor(Math.min(...ys)) - 2);
-  const x1 = Math.min(canvas.width, Math.ceil(Math.max(...xs)) + 2);
-  const y1 = Math.min(canvas.height, Math.ceil(Math.max(...ys)) + 2);
-  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  return sh;
 }
 
-/** Draws only the needed part of `img` (same size as the collage) at its own pixel position. */
-function drawRegion(ctx, img, box) {
-  if (box.w < 1 || box.h < 1) return;
-  ctx.drawImage(img, box.x, box.y, box.w, box.h, box.x, box.y, box.w, box.h);
+function createProgram(gl, vertSrc, fragSrc, uniformNames) {
+  const vs = compileShader(gl, gl.VERTEX_SHADER, vertSrc);
+  const fs = compileShader(gl, gl.FRAGMENT_SHADER, fragSrc);
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  gl.deleteShader(vs);
+  gl.deleteShader(fs);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    const log = gl.getProgramInfoLog(prog);
+    gl.deleteProgram(prog);
+    throw new Error(`WebGL2 link error: ${log}`);
+  }
+  const u = {};
+  for (const name of uniformNames) u[name] = gl.getUniformLocation(prog, name);
+  return { prog, u };
 }
 
-function makeGrain() {
+function createTexture(gl, w, h, { filter = gl.LINEAR, wrap = gl.CLAMP_TO_EDGE, data = null } = {}) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  return tex;
+}
+
+function createFbo(gl, w, h, opts = {}) {
+  const tex = createTexture(gl, w, h, opts);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { fbo, tex, w, h };
+}
+
+function resizeFbo(gl, target, w, h) {
+  if (target.w === w && target.h === h) return;
+  target.w = w;
+  target.h = h;
+  gl.bindTexture(gl.TEXTURE_2D, target.tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+}
+
+function makeGrainData() {
   const rand = mulberry32(GRAIN_SEED);
-  const c = make(GRAIN_SIZE, GRAIN_SIZE);
-  const g = ctx2d(c);
-  const img = g.createImageData(GRAIN_SIZE, GRAIN_SIZE);
-  for (let i = 0; i < img.data.length; i += 4) {
+  const data = new Uint8Array(GRAIN_SIZE * GRAIN_SIZE * 4);
+  for (let i = 0; i < data.length; i += 4) {
     const v = Math.floor(rand() * 256);
-    img.data[i] = v;
-    img.data[i + 1] = v;
-    img.data[i + 2] = v;
-    img.data[i + 3] = 255;
+    data[i] = v;
+    data[i + 1] = v;
+    data[i + 2] = v;
+    data[i + 3] = 255;
   }
-  g.putImageData(img, 0, 0);
-  return c;
+  return data;
 }
 
 export class CollageRenderer {
   constructor(outCanvas) {
     this.out = outCanvas;
-    this.octx = ctx2d(outCanvas, { willReadFrequently: true });
-    // CPU-backed layers: grade() reads pixels every frame, and a GPU readback stalled the
-    // pipeline (QA R3 F1). Patch work is small sub-rects, so CPU raster is cheaper overall.
-    this.collage = make();
-    this.cctx = ctx2d(this.collage, CPU);
-    this.plate = make();
-    this.pctx = ctx2d(this.plate, CPU);
-    this.mask = make();
-    this.mctx = ctx2d(this.mask, CPU);
-    this.small = make(PLATE_GRID, PLATE_GRID);
-    this.sctx = ctx2d(this.small, { willReadFrequently: true });
-    this.tiny = make(PLATE_BLUR_GRID, PLATE_BLUR_GRID);
-    this.tctx = ctx2d(this.tiny);
-    this.small2 = make(PLATE_GRID, PLATE_GRID);
-    this.s2ctx = ctx2d(this.small2);
-    this.bgSmall = make();
-    this.bgMid = make();
-    this.grain = makeGrain();
+    const gl = outCanvas.getContext('webgl2', {
+      alpha: false,
+      antialias: false,
+      depth: false,
+      stencil: false,
+      preserveDrawingBuffer: true,
+      powerPreference: 'high-performance',
+    });
+    if (!gl) throw new Error('WebGL2 is not supported in this browser');
+    this.gl = gl;
+    this.backend = 'webgl2';
+    this.width = Math.max(1, outCanvas.width || 1);
+    this.height = Math.max(1, outCanvas.height || 1);
+    this.mirror = false;
     this.births = new Map();
     this.layoutSeed = null;
     this.hasCollage = false;
+    this.timings = {};
+
+    this.emptyVao = gl.createVertexArray();
+    this.polyVao = gl.createVertexArray();
+    this.polyBuf = gl.createBuffer();
+    gl.bindVertexArray(this.polyVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.polyBuf);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+
+    this.polyScratch = new Float32Array(32); // 16 vec2 contour vertices
+    this.bandRects = new Float32Array(MAX_GLITCH_BANDS * 4);
+    this.bandShifts = new Float32Array(MAX_GLITCH_BANDS * 2);
+
+    this.initPrograms();
+    this.initResources();
+  }
+
+  initPrograms() {
+    const { gl } = this;
+    this.pCopy = createProgram(gl, FULLSCREEN_VERT, COPY_VIDEO_FRAG, ['uTex', 'uMirror']);
+    this.pPoly = createProgram(gl, POLY_VERT, SOLID_WHITE_FRAG, ['uSize']);
+    this.pBlur = createProgram(gl, FULLSCREEN_VERT, BLUR_FRAG, ['uTex', 'uDir']);
+    this.pPlateSeed = createProgram(gl, FULLSCREEN_VERT, PLATE_SEED_FRAG, [
+      'uVideo', 'uOvalMask', 'uMirror', 'uSize', 'uBox', 'uFrame', 'uIod',
+      'uCheekA', 'uCheekB', 'uCoverEyeA', 'uCoverEyeB', 'uCoverNose', 'uCoverMouth',
+    ]);
+    this.pPlateComp = createProgram(gl, FULLSCREEN_VERT, PLATE_COMPOSITE_FRAG, ['uPlate', 'uOvalMask', 'uSize', 'uBox']);
+    this.pBankCrop = createProgram(gl, FULLSCREEN_VERT, BANK_CROP_FRAG, ['uVideo', 'uMirror', 'uSize', 'uFrame', 'uIod', 'uFeat']);
+    this.pPatch = createProgram(gl, PATCH_VERT, PATCH_FRAG, [
+      'uSize', 'uFrame', 'uIod', 'uDestUV', 'uBoxWH', 'uScale', 'uRot', 'uFlipX',
+      'uSource', 'uFromBank', 'uMirror', 'uSrcFeat', 'uTileRect', 'uTexel',
+      'uPoly', 'uPolyCount', 'uCut', 'uHasCut', 'uFeatherTop', 'uFeatherBot',
+      'uGrow', 'uShade', 'uDeepen', 'uSharpen',
+    ]);
+    this.pSlice = createProgram(gl, PATCH_VERT, SLICE_FRAG, [
+      'uSize', 'uFrame', 'uIod', 'uDestUV', 'uBoxWH', 'uScale', 'uRot', 'uFlipX',
+      'uCollage', 'uSrcUV', 'uSide', 'uOuterSlope', 'uGrow', 'uShade',
+    ]);
+    this.pFinal = createProgram(gl, FULLSCREEN_VERT, FINAL_FRAG, [
+      'uCollage', 'uBgBlur', 'uGrain', 'uSize', 'uAlpha', 'uHasCollage', 'uGradeAmt',
+      'uBandCount', 'uBandRect', 'uBandShift', 'uGrainAlpha', 'uGrainOffset', 'uGrainSize',
+    ]);
+  }
+
+  initResources() {
+    const { gl } = this;
+    this.texVideo = createTexture(gl, 2, 2);
+    this.texGrain = createTexture(gl, GRAIN_SIZE, GRAIN_SIZE, {
+      filter: gl.NEAREST,
+      wrap: gl.REPEAT,
+      data: makeGrainData(),
+    });
+    this.fboPlateA = createFbo(gl, PLATE_SIZE, PLATE_SIZE);
+    this.fboPlateB = createFbo(gl, PLATE_SIZE, PLATE_SIZE);
+    this.fboOvalA = createFbo(gl, 2, 2);
+    this.fboOvalB = createFbo(gl, 2, 2);
+    this.fboCollage = createFbo(gl, 2, 2);
+    this.fboSliced = createFbo(gl, 2, 2);
+    this.fboBgA = createFbo(gl, 8, 8);
+    this.fboBgB = createFbo(gl, 8, 8);
+    this.fboBank = createFbo(gl, BANK_COLS * BANK_TILE_SIZE, BANK_ROWS * BANK_TILE_SIZE);
+    this.clearBank();
   }
 
   resize(w, h) {
-    if (this.out.width === w && this.out.height === h) return;
-    for (const c of [this.out, this.collage, this.plate, this.mask]) {
-      c.width = w;
-      c.height = h;
-    }
-    this.bgSmall.width = Math.max(4, Math.round(w / BG_BLUR_DIV));
-    this.bgSmall.height = Math.max(4, Math.round(h / BG_BLUR_DIV));
-    this.bgMid.width = this.bgSmall.width * 4;
-    this.bgMid.height = this.bgSmall.height * 4;
+    if (this.out.width === w && this.out.height === h && this.fboCollage.w === w && this.fboCollage.h === h) return;
+    const { gl } = this;
+    this.out.width = w;
+    this.out.height = h;
+    this.width = w;
+    this.height = h;
+    const hw = Math.max(2, Math.round(w / 2));
+    const hh = Math.max(2, Math.round(h / 2));
+    const bw = Math.max(8, Math.round(w / BG_BLUR_DIV));
+    const bh = Math.max(8, Math.round(h / BG_BLUR_DIV));
+    resizeFbo(gl, this.fboCollage, w, h);
+    resizeFbo(gl, this.fboSliced, w, h);
+    resizeFbo(gl, this.fboOvalA, hw, hh);
+    resizeFbo(gl, this.fboOvalB, hw, hh);
+    resizeFbo(gl, this.fboBgA, bw, bh);
+    resizeFbo(gl, this.fboBgB, bw, bh);
     this.hasCollage = false;
   }
 
-  /** Builds the collage layer from the live frame. `face` uses smoothed frame + features. */
-  drawCollage(source, face, layout, seed, now, reducedMotion) {
-    const { cctx } = this;
-    const { width: W, height: H } = this.collage;
-    cctx.setTransform(1, 0, 0, 1, 0, 0);
-    cctx.globalAlpha = 1;
+  /** Uploads live video or still image directly to GPU texture (UNPACK_FLIP_Y_WEBGL = true). */
+  uploadSource(source, mirror) {
+    const { gl } = this;
+    this.mirror = Boolean(mirror);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.texVideo);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  }
+
+  /** Clears the Expression Frame Bank GPU atlas (privacy guarantee D7). */
+  clearBank() {
+    const { gl } = this;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboBank.fbo);
+    gl.viewport(0, 0, this.fboBank.w, this.fboBank.h);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  drawQuad() {
+    const { gl } = this;
+    gl.bindVertexArray(this.emptyVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  bindTex(unit, tex) {
+    const { gl } = this;
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+  }
+
+  runBlur(src, dst, dx, dy) {
+    const { gl, pBlur } = this;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+    gl.viewport(0, 0, dst.w, dst.h);
+    gl.disable(gl.BLEND);
+    gl.useProgram(pBlur.prog);
+    this.bindTex(0, src.tex);
+    gl.uniform1i(pBlur.u.uTex, 0);
+    gl.uniform2f(pBlur.u.uDir, dx, dy);
+    this.drawQuad();
+  }
+
+  /** Builds the collage layer from the uploaded GPU source texture. */
+  drawCollage(source, face, layout, seed, now, reducedMotion, { mirror = this.mirror, bank = null, bankUpdates = [], bankOpts = null } = {}) {
     const t0 = performance.now();
-    cctx.drawImage(source, 0, 0, W, H);
-    this.drawPlate(source, face);
-    cctx.drawImage(this.plate, 0, 0);
-    const t1 = performance.now();
+    this.uploadSource(source, mirror);
+    const tUpload = performance.now();
+
+    const plateBox = this.renderPlate(face);
+    const tPlate = performance.now();
+
+    if (bankUpdates.length > 0) this.updateBankTiles(face, bankUpdates);
+    const tBank = performance.now();
+
     this.trackBirths(layout, seed, now, reducedMotion);
-    const F = frameMatrix(face.frame);
-    const Finv = invert(F);
-    for (const p of layout) {
-      if (p.kind === 'cheek') this.drawSlice(face, p, F, Finv, now);
-      else this.drawPatch(source, face, p, F, Finv, now);
+
+    const { gl, width: W, height: H } = this;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboCollage.fbo);
+    gl.viewport(0, 0, W, H);
+    gl.disable(gl.BLEND);
+
+    // 1. Live frame background.
+    gl.useProgram(this.pCopy.prog);
+    this.bindTex(0, this.texVideo);
+    gl.uniform1i(this.pCopy.u.uTex, 0);
+    gl.uniform1f(this.pCopy.u.uMirror, this.mirror ? 1 : 0);
+    this.drawQuad();
+
+    // 2. Flattened skin plate masked by feathered face oval.
+    if (plateBox) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.useProgram(this.pPlateComp.prog);
+      this.bindTex(0, this.fboPlateA.tex);
+      this.bindTex(1, this.fboOvalA.tex);
+      gl.uniform1i(this.pPlateComp.u.uPlate, 0);
+      gl.uniform1i(this.pPlateComp.u.uOvalMask, 1);
+      gl.uniform2f(this.pPlateComp.u.uSize, W, H);
+      gl.uniform4f(this.pPlateComp.u.uBox, plateBox.bx, plateBox.by, plateBox.bw, plateBox.bh);
+      this.drawQuad();
     }
-    cctx.setTransform(1, 0, 0, 1, 0, 0);
-    const t2 = performance.now();
-    this.grade(face);
-    this.timings = { plateMs: t1 - t0, patchMs: t2 - t1, gradeMs: performance.now() - t2 };
-    cctx.globalAlpha = 1;
+
+    // 3. Organic landmark-contoured body patches (eyes, noses, mouths).
+    const slices = [];
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(this.pPatch.prog);
+    gl.uniform2f(this.pPatch.u.uSize, W, H);
+    gl.uniform4f(this.pPatch.u.uFrame, face.frame.ox, face.frame.oy, face.frame.ax, face.frame.ay);
+    gl.uniform1f(this.pPatch.u.uIod, face.frame.iod);
+    gl.uniform1f(this.pPatch.u.uMirror, this.mirror ? 1 : 0);
+
+    for (const p of layout) {
+      if (p.kind === 'cheek') {
+        slices.push(p);
+        continue;
+      }
+      this.drawPatch(face, p, now, bank, bankOpts);
+    }
+    const tPatch = performance.now();
+
+    // 4. Copy collage -> fboSliced, then draw hard-cut angled edge slices from fboCollage onto fboSliced.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboSliced.fbo);
+    gl.viewport(0, 0, W, H);
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.pCopy.prog);
+    this.bindTex(0, this.fboCollage.tex);
+    gl.uniform1i(this.pCopy.u.uTex, 0);
+    gl.uniform1f(this.pCopy.u.uMirror, 0);
+    this.drawQuad();
+
+    if (slices.length > 0) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.useProgram(this.pSlice.prog);
+      this.bindTex(0, this.fboCollage.tex);
+      gl.uniform1i(this.pSlice.u.uCollage, 0);
+      gl.uniform2f(this.pSlice.u.uSize, W, H);
+      gl.uniform4f(this.pSlice.u.uFrame, face.frame.ox, face.frame.oy, face.frame.ax, face.frame.ay);
+      gl.uniform1f(this.pSlice.u.uIod, face.frame.iod);
+      for (const s of slices) this.drawSlice(s, now);
+    }
+    gl.disable(gl.BLEND);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    const tEnd = performance.now();
+    this.timings = {
+      uploadMs: tUpload - t0,
+      plateMs: tPlate - tUpload,
+      bankMs: tBank - tPlate,
+      patchMs: tPatch - tBank,
+      sliceMs: tEnd - tPatch,
+      gradeMs: 0,
+    };
     this.hasCollage = true;
   }
 
   trackBirths(layout, seed, now, reducedMotion) {
-    // A new seed cuts instantly (visual spec 6); only patches added by a count change animate in.
     const instant = reducedMotion || seed !== this.layoutSeed;
     const ids = new Set(layout.map((p) => p.id));
     for (const id of [...this.births.keys()]) if (!ids.has(id)) this.births.delete(id);
@@ -170,352 +376,295 @@ export class CollageRenderer {
     this.layoutSeed = seed;
   }
 
-  drawPatch(source, face, p, F, Finv, now) {
-    const { cctx } = this;
-    const f = face.features[p.source];
-    if (!f) return;
-    const age = now - (this.births.get(p.id) ?? -Infinity);
-    const grow = age < ADD_ANIM_MS ? easeOut(age / ADD_ANIM_MS) : 1;
-    const du = p.original ? f.u : p.u;
-    const dv = p.original ? f.v : p.v;
-    const s = p.scale * (0.6 + 0.4 * grow);
-    const pts = cutPolygon(f.w, f.h, p.cut);
-    // Patch is built in a face-aligned scratch canvas, then pasted with move / rotate / flip.
-    const { x, sw, sh, kx } = this.scratchFor(f.w, f.h, face.frame.iod * s);
-    x.save();
-    pathPoly(x, pts);
-    x.clip();
-    x.save();
-    x.translate(-f.u, -f.v);
-    x.transform(...Finv);
-    drawRegion(x, source, pixelBox(F, f.u, f.v, f.w, f.h, this.collage));
-    x.restore();
-    this.shadeScratch(x, f.w, f.h, p.shade);
-    x.restore();
-    if (p.deepen) this.deepenScratch(sw, sh, p.deepen);
-    this.finishEdges(x, f.w, f.h, pts, p.cut, PATCH_FEATHER_IOD / s, (SEAM_PX * 2) / kx);
-    cctx.save();
-    cctx.globalAlpha = grow;
-    cctx.setTransform(...F);
-    cctx.translate(du, dv);
-    cctx.rotate((p.rot * Math.PI) / 180);
-    cctx.scale(p.flipX ? -s : s, s);
-    cctx.drawImage(this.scratch, 0, 0, sw, sh, -f.w / 2, -f.h / 2, f.w, f.h);
-    cctx.restore();
-  }
-
-  /** Edge slice: copies a strip of the finished collage at srcU and pastes it `shift` further out. */
-  drawSlice(face, p, F, Finv, now) {
-    const { cctx } = this;
-    const age = now - (this.births.get(p.id) ?? -Infinity);
-    const grow = age < ADD_ANIM_MS ? easeOut(age / ADD_ANIM_MS) : 1;
-    const w = p.len;
-    const h = p.h;
-    const pts = cutPolygon(w, h, p.cut);
-    const { x, sw, sh, kx } = this.scratchFor(w, h, face.frame.iod);
-    x.save();
-    x.translate(-p.srcU, -p.v);
-    x.transform(...Finv);
-    drawRegion(x, this.collage, pixelBox(F, p.srcU, p.v, w, h, this.collage));
-    x.restore();
-    this.shadeScratch(x, w, h, p.shade);
-    this.finishEdges(x, w, h, pts, p.cut, PATCH_FEATHER_IOD, (SEAM_PX * 2) / kx);
-    cctx.save();
-    cctx.globalAlpha = grow;
-    cctx.setTransform(...F);
-    cctx.translate(p.srcU + p.shift * grow, p.v);
-    cctx.drawImage(this.scratch, 0, 0, sw, sh, -w / 2, -h / 2, w, h);
-    cctx.restore();
-  }
-
-  /** Patch-local scratch canvas at `k` px per face unit, local origin at its centre. */
-  scratchFor(w, h, k) {
-    // Resizing a canvas reallocates it (~1 ms per patch, QA R3 F1): only grow, in 64 px steps.
-    if (!this.scratch) {
-      this.scratch = make(64, 64);
-      this.xctx = ctx2d(this.scratch, CPU);
-    }
-    const sw = Math.max(2, Math.min(MAX_SCRATCH_PX, Math.ceil(w * k)));
-    const sh = Math.max(2, Math.min(MAX_SCRATCH_PX, Math.ceil(h * k)));
-    const step = (n) => Math.min(MAX_SCRATCH_PX, Math.ceil(n / 64) * 64);
-    if (this.scratch.width < sw || this.scratch.height < sh) {
-      this.scratch.width = Math.max(this.scratch.width, step(sw));
-      this.scratch.height = Math.max(this.scratch.height, step(sh));
-    }
-    this.xctx.setTransform(1, 0, 0, 1, 0, 0);
-    this.xctx.clearRect(0, 0, sw + 1, sh + 1);
-    const kx = sw / w;
-    this.xctx.setTransform(kx, 0, 0, sh / h, sw / 2, sh / 2);
-    return { x: this.xctx, sw, sh, kx };
-  }
-
-  /** Deterministic brightness jitter (about ±5%) so stacked copies read as separate pieces. */
-  shadeScratch(x, w, h, shade) {
-    if (!shade) return;
-    x.save();
-    x.globalCompositeOperation = 'source-atop';
-    x.fillStyle = shade > 0 ? `rgba(255,255,255,${shade.toFixed(3)})` : `rgba(0,0,0,${(-shade).toFixed(3)})`;
-    x.fillRect(-w, -h, w * 2, h * 2);
-    x.restore();
-  }
-
-  /** Multiplies the patch with itself: darks (nostrils, tip shadow) deepen more than highlights. */
-  deepenScratch(sw, sh, amount) {
-    const x = this.xctx;
-    // Self-multiply, then screen the same amount of white back: mid skin returns close to its
-    // level (no darker box), while nostrils and tip shadow keep most of the deepening.
-    x.save();
-    x.setTransform(1, 0, 0, 1, 0, 0);
-    x.globalCompositeOperation = 'multiply';
-    x.globalAlpha = amount;
-    x.drawImage(this.scratch, 0, 0, sw, sh, 0, 0, sw, sh);
-    x.globalCompositeOperation = 'source-atop';
-    x.globalAlpha = amount * 0.35;
-    x.fillStyle = '#fff';
-    x.fillRect(0, 0, sw, sh);
-    x.restore();
-  }
-
-  /** Feathers soft edges with destination-out ramps and draws a 1 px seam along the hard (cut) edges. */
-  finishEdges(x, w, h, pts, cut, feather, seamW) {
-    x.save();
-    x.globalCompositeOperation = 'destination-out';
-    for (const e of softEdges(cut)) {
-      const vert = e === 'top' || e === 'bottom';
-      const half = (vert ? h : w) / 2;
-      const sign = e === 'top' || e === 'left' ? -1 : 1;
-      const outer = sign * half;
-      const inner = outer - sign * feather;
-      const g = vert ? x.createLinearGradient(0, outer, 0, inner) : x.createLinearGradient(outer, 0, inner, 0);
-      g.addColorStop(0, 'rgba(0,0,0,1)');
-      g.addColorStop(1, 'rgba(0,0,0,0)');
-      x.fillStyle = g;
-      const a = Math.min(outer, inner);
-      if (vert) x.fillRect(-w, a, w * 2, feather);
-      else x.fillRect(a, -h, feather, h * 2);
-    }
-    x.globalCompositeOperation = 'source-atop';
-    x.strokeStyle = SEAM_COLOR;
-    x.lineWidth = seamW;
-    for (const e of cut.hard ?? []) {
-      const [i, j] = EDGE_INDEX[e];
-      x.beginPath();
-      x.moveTo(...pts[i]);
-      x.lineTo(...pts[j]);
-      x.stroke();
-    }
-    x.restore();
-  }
-
-  /** Lift + warm tone curve inside a feathered face ellipse (guide section 2); mild lift outside it. */
-  grade(face) {
-    if (!this.lut) {
-      this.lut = GRADE.k.map((kk) => {
-        const t = new Uint8ClampedArray(256);
-        for (let i = 0; i < 256; i += 1) t[i] = Math.round((255 * (1 - Math.exp((-kk * i) / 255))) / (1 - Math.exp(-kk)));
-        return t;
-      });
-      // Contrast is stretched on luma only (same offset on R, G, B) so it does not push the chroma.
-      this.lumaDelta = new Float32Array(256);
-      for (let i = 0; i < 256; i += 1) this.lumaDelta[i] = (i - GRADE.mid) * (GRADE.contrast - 1);
-    }
-    const ld = this.lumaDelta;
-    const { frame } = face;
-    const { width: W, height: H } = this.collage;
-    const c = toPixel(frame, { u: GRADE.u0, v: GRADE.v0 });
-    // The outside lift fades to 0 by q = 1 + feather + outFade, which lies inside the box: no rectangle edge (QA R3 R7).
-    const r = Math.max(GRADE.ru, GRADE.rv) * (1 + GRADE.feather + GRADE.outFade) * frame.iod;
-    const qEnd = 1 + GRADE.feather + GRADE.outFade;
-    const x0 = Math.max(0, Math.floor(c.x - r));
-    const y0 = Math.max(0, Math.floor(c.y - r));
-    const x1 = Math.min(W, Math.ceil(c.x + r));
-    const y1 = Math.min(H, Math.ceil(c.y + r));
-    if (x1 - x0 < 2 || y1 - y0 < 2) return;
-    const img = this.cctx.getImageData(x0, y0, x1 - x0, y1 - y0);
-    const d = img.data;
-    const [lr, lg, lb] = this.lut;
-    const iw = x1 - x0;
-    const inv = 1 / frame.iod;
-    for (let yy = y0; yy < y1; yy += 1) {
-      const py = yy + 0.5 - frame.oy;
-      for (let xx = x0; xx < x1; xx += 1) {
-        const px = xx + 0.5 - frame.ox;
-        const du = ((px * frame.ax + py * frame.ay) * inv - GRADE.u0) / GRADE.ru;
-        const dv = ((-px * frame.ay + py * frame.ax) * inv - GRADE.v0) / GRADE.rv;
-        const q = Math.sqrt(du * du + dv * dv);
-        if (q >= qEnd) continue;
-        const inside = q <= 1 ? 1 : q >= 1 + GRADE.feather ? 0 : 1 - (q - 1) / GRADE.feather;
-        const out = q <= 1 + GRADE.feather ? 1 : (qEnd - q) / GRADE.outFade;
-        const m = GRADE.outside * out + (1 - GRADE.outside) * inside;
-        const o = ((yy - y0) * iw + (xx - x0)) * 4;
-        const r0 = lr[d[o]];
-        const g0 = lg[d[o + 1]];
-        const b0 = lb[d[o + 2]];
-        const lift = ld[(0.299 * r0 + 0.587 * g0 + 0.114 * b0) | 0];
-        d[o] += (r0 + lift - d[o]) * m;
-        d[o + 1] += (g0 + lift - d[o + 1]) * m;
-        d[o + 2] += (b0 + lift - d[o + 2]) * m;
-      }
-    }
-    this.cctx.putImageData(img, x0, y0);
-  }
-
-  /** Skin plate: face oval with features painted over in cheek colour, blurred, brightened, soft-edged. */
-  drawPlate(source, face) {
+  renderPlate(face) {
+    const { gl, width: W, height: H } = this;
     const { frame, features, oval } = face;
-    const { width: W, height: H } = this.plate;
+    if (!oval?.length) return null;
     const ovalPx = oval.map((q) => toPixel(frame, q));
-    const xs = ovalPx.map((p) => p.x);
-    const ys = ovalPx.map((p) => p.y);
-    const pad = frame.iod * 0.2;
-    const bx = Math.max(0, Math.min(...xs) - pad);
-    const by = Math.max(0, Math.min(...ys) - pad);
-    const bw = Math.min(W, Math.max(...xs) + pad) - bx;
-    const bh = Math.min(H, Math.max(...ys) + pad) - by;
-    if (bw < 4 || bh < 4) return;
-    const G = PLATE_GRID;
-    const toSmall = [G / bw, 0, 0, G / bh, (-bx * G) / bw, (-by * G) / bh];
-    const { sctx } = this;
-    sctx.setTransform(1, 0, 0, 1, 0, 0);
-    sctx.drawImage(source, bx, by, bw, bh, 0, 0, G, G);
-    const cheek = this.sampleCheeks(features, frame, toSmall);
-    // Everything outside the oval becomes skin too, so background never bleeds into the blur.
-    sctx.save();
-    sctx.fillStyle = cheek.mid;
-    sctx.beginPath();
-    sctx.rect(0, 0, G, G);
-    sctx.setTransform(...toSmall);
-    pathPoly(sctx, ovalPx.map((p) => [p.x, p.y]));
-    sctx.setTransform(1, 0, 0, 1, 0, 0);
-    sctx.fill('evenodd');
-    sctx.restore();
-    this.coverFeatures(features, frame, toSmall, cheek);
-    this.tctx.drawImage(this.small, 0, 0, PLATE_BLUR_GRID, PLATE_BLUR_GRID);
-    this.s2ctx.drawImage(this.tiny, 0, 0, G, G);
-    const { pctx, mctx } = this;
-    pctx.globalCompositeOperation = 'source-over';
-    pctx.clearRect(0, 0, W, H);
-    pctx.imageSmoothingQuality = 'high';
-    pctx.drawImage(this.small2, 0, 0, G, G, bx, by, bw, bh);
-    pctx.globalCompositeOperation = 'screen';
-    pctx.fillStyle = PLATE_BRIGHTEN;
-    pctx.fillRect(bx, by, bw, bh);
-    // Soft oval mask via the shadow trick: pulled slightly inward so the feather fades cleanly inside the hairline/jaw.
-    const cx = ovalPx.reduce((a, p) => a + p.x, 0) / ovalPx.length;
-    const cy = ovalPx.reduce((a, p) => a + p.y, 0) / ovalPx.length;
-    const insetOval = ovalPx.map((p) => [cx + (p.x - cx) * OVAL_INSET, cy + (p.y - cy) * OVAL_INSET]);
-    mctx.clearRect(0, 0, W, H);
-    mctx.save();
-    const off = W + bw + 100;
-    mctx.shadowColor = '#fff';
-    mctx.shadowBlur = Math.max(4, FEATHER_IOD * frame.iod * 2.2);
-    mctx.shadowOffsetX = off;
-    mctx.fillStyle = '#fff';
-    pathPoly(mctx, insetOval.map(([x, y]) => [x - off, y]));
-    mctx.fill();
-    mctx.restore();
-    pctx.globalCompositeOperation = 'destination-in';
-    pctx.drawImage(this.mask, 0, 0);
-    pctx.globalCompositeOperation = 'source-over';
-  }
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let cx = 0;
+    let cy = 0;
+    for (const p of ovalPx) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+      cx += p.x;
+      cy += p.y;
+    }
+    cx /= ovalPx.length;
+    cy /= ovalPx.length;
+    const pad = frame.iod * 0.22;
+    const bx = Math.max(0, minX - pad);
+    const by = Math.max(0, minY - pad);
+    const bw = Math.min(W, maxX + pad) - bx;
+    const bh = Math.min(H, maxY + pad) - by;
+    if (bw < 4 || bh < 4) return null;
 
-  sampleCheeks(features, frame, toSmall) {
-    const read = (q) => {
-      const p = toPixel(frame, q);
-      const x = Math.round(toSmall[0] * p.x + toSmall[4]);
-      const y = Math.round(toSmall[3] * p.y + toSmall[5]);
-      const cx = Math.min(PLATE_GRID - 2, Math.max(1, x));
-      const cy = Math.min(PLATE_GRID - 2, Math.max(1, y));
-      const d = this.sctx.getImageData(cx - 1, cy - 1, 3, 3).data;
-      const rgb = [0, 0, 0];
-      for (let i = 0; i < d.length; i += 4) for (let k = 0; k < 3; k += 1) rgb[k] += d[i + k] / 9;
-      return rgb;
-    };
-    const a = read(features.cheekA);
-    const b = read(features.cheekB);
-    const css = (c) => `rgb(${c.map((v) => Math.round(v)).join(',')})`;
-    return { a: css(a), b: css(b), mid: css(a.map((v, i) => (v + b[i]) / 2)) };
-  }
+    // 1. Rasterize face oval as a triangle fan into fboOvalA (sharp mask first for plate seeding).
+    const verts = new Float32Array((ovalPx.length + 2) * 2);
+    verts[0] = cx;
+    verts[1] = cy;
+    for (let i = 0; i < ovalPx.length; i += 1) {
+      verts[(i + 1) * 2] = ovalPx[i].x;
+      verts[(i + 1) * 2 + 1] = ovalPx[i].y;
+    }
+    verts[(ovalPx.length + 1) * 2] = ovalPx[0].x;
+    verts[(ovalPx.length + 1) * 2 + 1] = ovalPx[0].y;
 
-  coverFeatures(features, frame, toSmall, cheek) {
-    const { sctx } = this;
-    const F = frameMatrix(frame);
-    sctx.save();
-    sctx.setTransform(...toSmall);
-    sctx.transform(...F);
-    const rect = (u, v, w, h, color) => {
-      sctx.fillStyle = color;
-      sctx.fillRect(u - w / 2, v - h / 2, w, h);
-    };
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboOvalA.fbo);
+    gl.viewport(0, 0, this.fboOvalA.w, this.fboOvalA.h);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(this.pPoly.prog);
+    gl.uniform2f(this.pPoly.u.uSize, W, H);
+    gl.bindVertexArray(this.polyVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.polyBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STREAM_DRAW);
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, ovalPx.length + 2);
+
+    // 2. Seed 64x64 skin plate: fill outside oval + cover eye/brow/nose/mouth using GPU-sampled cheeks.
+    const cheekAPx = toPixel(frame, features.cheekA);
+    const cheekBPx = toPixel(frame, features.cheekB);
+    // Cover full orbital + eyebrow area when building the flattened skin plate (so Minimal Q1 wipes brows!).
     const { eyeA, eyeB, nose, mouth } = features;
-    rect(eyeA.u, eyeA.v - COVER.eye.lift + 0.08, COVER.eye.w, COVER.eye.h, cheek.a);
-    rect(eyeB.u, eyeB.v - COVER.eye.lift + 0.08, COVER.eye.w, COVER.eye.h, cheek.b);
-    rect(nose.u, (COVER.nose.top + COVER.nose.bottom) / 2, COVER.nose.w, COVER.nose.bottom - COVER.nose.top, cheek.mid);
-    rect(mouth.u, mouth.v, mouth.w * COVER.mouth.grow, mouth.h * COVER.mouth.grow, cheek.mid);
-    sctx.restore();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboPlateA.fbo);
+    gl.viewport(0, 0, PLATE_SIZE, PLATE_SIZE);
+    gl.useProgram(this.pPlateSeed.prog);
+    this.bindTex(0, this.texVideo);
+    this.bindTex(1, this.fboOvalA.tex);
+    gl.uniform1i(this.pPlateSeed.u.uVideo, 0);
+    gl.uniform1i(this.pPlateSeed.u.uOvalMask, 1);
+    gl.uniform1f(this.pPlateSeed.u.uMirror, this.mirror ? 1 : 0);
+    gl.uniform2f(this.pPlateSeed.u.uSize, W, H);
+    gl.uniform4f(this.pPlateSeed.u.uBox, bx, by, bw, bh);
+    gl.uniform4f(this.pPlateSeed.u.uFrame, frame.ox, frame.oy, frame.ax, frame.ay);
+    gl.uniform1f(this.pPlateSeed.u.uIod, frame.iod);
+    gl.uniform2f(this.pPlateSeed.u.uCheekA, cheekAPx.x, cheekAPx.y);
+    gl.uniform2f(this.pPlateSeed.u.uCheekB, cheekBPx.x, cheekBPx.y);
+    gl.uniform4f(this.pPlateSeed.u.uCoverEyeA, eyeA.u, eyeA.v - COVER.eye.lift, COVER.eye.w, COVER.eye.h);
+    gl.uniform4f(this.pPlateSeed.u.uCoverEyeB, eyeB.u, eyeB.v - COVER.eye.lift, COVER.eye.w, COVER.eye.h);
+    gl.uniform4f(this.pPlateSeed.u.uCoverNose, nose.u, (COVER.nose.top + COVER.nose.bottom) * 0.5, COVER.nose.w, COVER.nose.bottom - COVER.nose.top);
+    gl.uniform4f(this.pPlateSeed.u.uCoverMouth, mouth.u, mouth.v, mouth.w * COVER.mouth.grow, mouth.h * COVER.mouth.grow);
+    this.drawQuad();
+
+    // 3. Multi-pass GPU blur on 64x64 plate (~0.35 IOD equivalent smooth skin lighting gradient, Q1 >= 90%).
+    for (const step of [2.5, 4.5, 6.5]) {
+      this.runBlur(this.fboPlateA, this.fboPlateB, step / PLATE_SIZE, 0);
+      this.runBlur(this.fboPlateB, this.fboPlateA, 0, step / PLATE_SIZE);
+    }
+
+    // 4. Feather the oval mask smoothly across 0.10 IOD (zero boundary seam, Q2 PASS).
+    const sigmaPx = Math.max(2.5, FEATHER_IOD * frame.iod * 0.65);
+    const sx = (sigmaPx * 0.5) / this.fboOvalA.w;
+    const sy = (sigmaPx * 0.5) / this.fboOvalA.h;
+    this.runBlur(this.fboOvalA, this.fboOvalB, sx, 0);
+    this.runBlur(this.fboOvalB, this.fboOvalA, 0, sy);
+    this.runBlur(this.fboOvalA, this.fboOvalB, sx * 1.4, 0);
+    this.runBlur(this.fboOvalB, this.fboOvalA, 0, sy * 1.4);
+
+    return { bx, by, bw, bh };
   }
 
-  /** Final frame: blurred camera under the collage (privacy while searching / lost), then glitch + grain. */
-  compose(source, { alpha, seed, glitch, now, reducedMotion, avoidRows, face = null }) {
-    const { octx } = this;
-    const { width: W, height: H } = this.out;
-    octx.setTransform(1, 0, 0, 1, 0, 0);
-    octx.globalAlpha = 1;
-    octx.globalCompositeOperation = 'source-over';
-    if (alpha < 1 || !this.hasCollage) this.drawBlurred(source);
-    if (alpha > 0 && this.hasCollage) {
-      octx.globalAlpha = alpha;
-      octx.drawImage(this.collage, 0, 0);
-      octx.globalAlpha = 1;
+  /** Renders requested expression captures directly into their dedicated 256x256 GPU atlas tiles. */
+  updateBankTiles(face, captures) {
+    const { gl, pBankCrop, width: W, height: H } = this;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboBank.fbo);
+    gl.disable(gl.BLEND);
+    gl.useProgram(pBankCrop.prog);
+    this.bindTex(0, this.texVideo);
+    gl.uniform1i(pBankCrop.u.uVideo, 0);
+    gl.uniform1f(pBankCrop.u.uMirror, this.mirror ? 1 : 0);
+    gl.uniform2f(pBankCrop.u.uSize, W, H);
+    gl.uniform4f(pBankCrop.u.uFrame, face.frame.ox, face.frame.oy, face.frame.ax, face.frame.ay);
+    gl.uniform1f(pBankCrop.u.uIod, face.frame.iod);
+    for (const c of captures) {
+      const col = c.tileIndex % BANK_COLS;
+      const row = Math.floor(c.tileIndex / BANK_COLS);
+      gl.viewport(col * BANK_TILE_SIZE, row * BANK_TILE_SIZE, BANK_TILE_SIZE, BANK_TILE_SIZE);
+      gl.uniform4f(pBankCrop.u.uFeat, c.feature.u, c.feature.v, c.feature.w, c.feature.h);
+      this.drawQuad();
     }
-    const bands = glitchBands({ seed, timeMs: now, intensity: glitch * alpha, height: H, width: W, face, avoid: avoidRows, reducedMotion });
-    for (const band of bands) this.slipBand(band, W);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  drawPatch(face, p, now, bank, bankOpts) {
+    const { gl, pPatch, width: W, height: H } = this;
+    const srcKey = p.brow && p.kind === 'eye' ? (p.source === 'eyeB' ? 'eyeBrowB' : 'eyeBrowA') : p.source;
+    const liveFeat = face.features[srcKey] ?? face.features[p.source];
+    if (!liveFeat) return;
+
+    // Top-row brow eyes use the live brow crop unless banked; lower orbital eyes use banked expressions freely.
+    const banked = !p.original && !p.brow && bank ? bank.resolve(p.expr, now, bankOpts ?? undefined) : null;
+    const feat = banked ? banked.feature : liveFeat;
+    const contour = banked?.contour ?? face.contours?.[srcKey] ?? face.contours?.[p.source] ?? ellipseContour(feat.w * 0.36, feat.h * 0.34);
+
+    const age = now - (this.births.get(p.id) ?? -Infinity);
+    const grow = age < ADD_ANIM_MS ? easeOut(age / ADD_ANIM_MS) : 1;
+    const du = p.original ? liveFeat.u : p.u;
+    const dv = p.original ? liveFeat.v : p.v;
+    const s = p.scale * (0.6 + 0.4 * grow);
+    const style = MASK_STYLE[p.kind] ?? MASK_STYLE.eye;
+
+    const polyN = Math.min(16, contour.length);
+    for (let i = 0; i < polyN; i += 1) {
+      this.polyScratch[i * 2] = contour[i][0];
+      this.polyScratch[i * 2 + 1] = contour[i][1];
+    }
+
+    // Selective crisp collage cut chord (originals stay organic without harsh interior slice on Minimal).
+    const plane = cutHalfPlane(feat.w, feat.h, p.cut);
+    const hasCut = plane && !p.original ? 1 : 0;
+
+    if (banked) {
+      const col = banked.tileIndex % BANK_COLS;
+      const row = Math.floor(banked.tileIndex / BANK_COLS);
+      const tw = 1 / BANK_COLS;
+      const th = 1 / BANK_ROWS;
+      this.bindTex(0, this.fboBank.tex);
+      gl.uniform1f(pPatch.u.uFromBank, 1);
+      gl.uniform4f(pPatch.u.uTileRect, col * tw, row * th, tw, th);
+      gl.uniform2f(pPatch.u.uTexel, 1 / this.fboBank.w, 1 / this.fboBank.h);
+    } else {
+      this.bindTex(0, this.texVideo);
+      gl.uniform1f(pPatch.u.uFromBank, 0);
+      gl.uniform4f(pPatch.u.uTileRect, 0, 0, 1, 1);
+      gl.uniform2f(pPatch.u.uTexel, 1 / W, 1 / H);
+    }
+
+    gl.uniform1i(pPatch.u.uSource, 0);
+    gl.uniform2f(pPatch.u.uDestUV, du, dv);
+    gl.uniform2f(pPatch.u.uBoxWH, feat.w, feat.h);
+    gl.uniform1f(pPatch.u.uScale, s);
+    gl.uniform1f(pPatch.u.uRot, (p.rot * Math.PI) / 180);
+    gl.uniform1f(pPatch.u.uFlipX, p.flipX ? -1 : 1);
+    gl.uniform4f(pPatch.u.uSrcFeat, feat.u, feat.v, feat.w, feat.h);
+    gl.uniform2fv(pPatch.u.uPoly, this.polyScratch);
+    gl.uniform1i(pPatch.u.uPolyCount, polyN);
+    gl.uniform3f(pPatch.u.uCut, plane ? plane[0] : 0, plane ? plane[1] : 1, plane ? plane[2] : 10);
+    gl.uniform1f(pPatch.u.uHasCut, hasCut);
+    gl.uniform1f(pPatch.u.uFeatherTop, style.featherTop / Math.max(0.7, s));
+    gl.uniform1f(pPatch.u.uFeatherBot, style.featherBot / Math.max(0.7, s));
+    gl.uniform1f(pPatch.u.uGrow, grow);
+    gl.uniform1f(pPatch.u.uShade, p.shade ?? 0);
+    gl.uniform1f(pPatch.u.uDeepen, p.deepen ?? 0);
+    gl.uniform1f(pPatch.u.uSharpen, p.original ? 0.15 : style.sharpen);
+    this.drawQuad();
+  }
+
+  drawSlice(p, now) {
+    const { gl, pSlice } = this;
+    const age = now - (this.births.get(p.id) ?? -Infinity);
+    const grow = age < ADD_ANIM_MS ? easeOut(age / ADD_ANIM_MS) : 1;
+    const slope = Math.tan(((p.cut?.signedAngle ?? 24) * Math.PI) / 180);
+    gl.uniform2f(pSlice.u.uDestUV, p.srcU + p.shift * grow, p.v);
+    gl.uniform2f(pSlice.u.uBoxWH, p.len, p.h);
+    gl.uniform1f(pSlice.u.uScale, 1);
+    gl.uniform1f(pSlice.u.uRot, 0);
+    gl.uniform1f(pSlice.u.uFlipX, 1);
+    gl.uniform2f(pSlice.u.uSrcUV, p.srcU, p.v);
+    gl.uniform1f(pSlice.u.uSide, p.side);
+    gl.uniform1f(pSlice.u.uOuterSlope, slope);
+    gl.uniform1f(pSlice.u.uGrow, grow);
+    gl.uniform1f(pSlice.u.uShade, p.shade ?? 0);
+    this.drawQuad();
+  }
+
+  /** Renders low-res blurred camera background (only when alpha < 1 or no collage yet, for privacy). */
+  renderBgBlur(source, mirror) {
+    const { gl, pCopy } = this;
+    if (!this.hasCollage) this.uploadSource(source, mirror);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboBgA.fbo);
+    gl.viewport(0, 0, this.fboBgA.w, this.fboBgA.h);
+    gl.disable(gl.BLEND);
+    gl.useProgram(pCopy.prog);
+    this.bindTex(0, this.texVideo);
+    gl.uniform1i(pCopy.u.uTex, 0);
+    gl.uniform1f(pCopy.u.uMirror, this.mirror ? 1 : 0);
+    this.drawQuad();
+    this.runBlur(this.fboBgA, this.fboBgB, 1.4 / this.fboBgA.w, 0);
+    this.runBlur(this.fboBgB, this.fboBgA, 0, 1.4 / this.fboBgA.h);
+  }
+
+  /** Final screen pass: privacy blur + collage + GPU glitch slip/R-B split + magazine-scan tone + grain. */
+  compose(source, { alpha, seed, glitch, now, reducedMotion, avoidRows, face = null, mirror = this.mirror, gradeAmt = 1 }) {
+    const t0 = performance.now();
+    const { gl, pFinal, width: W, height: H } = this;
+    if (alpha < 0.999 || !this.hasCollage) {
+      this.uploadSource(source, mirror);
+      this.renderBgBlur(source, mirror);
+    }
+
+    const bands = glitchBands({
+      seed,
+      timeMs: now,
+      intensity: glitch * alpha,
+      height: H,
+      width: W,
+      face,
+      avoid: avoidRows,
+      reducedMotion,
+    });
+    const bandCount = Math.min(MAX_GLITCH_BANDS, bands.length);
+    for (let i = 0; i < bandCount; i += 1) {
+      const b = bands[i];
+      this.bandRects[i * 4] = b.x0;
+      this.bandRects[i * 4 + 1] = b.y;
+      this.bandRects[i * 4 + 2] = b.x1;
+      this.bandRects[i * 4 + 3] = b.y + b.h;
+      this.bandShifts[i * 2] = b.shift;
+      this.bandShifts[i * 2 + 1] = b.split;
+    }
+
     const grainAmt = glitch * alpha;
-    if (grainAmt > 0) {
-      const slot = reducedMotion ? 0 : Math.floor(now / GRAIN_SLOT_MS);
-      octx.globalCompositeOperation = 'overlay';
-      octx.globalAlpha = GRAIN_ALPHA * (0.4 + 0.6 * grainAmt);
-      const gx = ((seed ^ Math.imul(slot, 73)) >>> 0) % GRAIN_SIZE;
-      const gy = ((seed ^ Math.imul(slot, 151)) >>> 0) % GRAIN_SIZE;
-      for (let y = -gy; y < H; y += GRAIN_SIZE) for (let x = -gx; x < W; x += GRAIN_SIZE) octx.drawImage(this.grain, x, y);
-    }
-    octx.globalCompositeOperation = 'source-over';
-    octx.globalAlpha = 1;
+    const slot = reducedMotion ? 0 : Math.floor(now / GRAIN_SLOT_MS);
+    const gx = ((seed ^ Math.imul(slot, 73)) >>> 0) % GRAIN_SIZE;
+    const gy = ((seed ^ Math.imul(slot, 151)) >>> 0) % GRAIN_SIZE;
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, W, H);
+    gl.disable(gl.BLEND);
+    gl.useProgram(pFinal.prog);
+    this.bindTex(0, this.fboSliced.tex);
+    this.bindTex(1, this.fboBgA.tex);
+    this.bindTex(2, this.texGrain);
+    gl.uniform1i(pFinal.u.uCollage, 0);
+    gl.uniform1i(pFinal.u.uBgBlur, 1);
+    gl.uniform1i(pFinal.u.uGrain, 2);
+    gl.uniform2f(pFinal.u.uSize, W, H);
+    gl.uniform1f(pFinal.u.uAlpha, alpha);
+    gl.uniform1f(pFinal.u.uHasCollage, this.hasCollage ? 1 : 0);
+    gl.uniform1f(pFinal.u.uGradeAmt, this.hasCollage ? gradeAmt * alpha : 0);
+    gl.uniform1i(pFinal.u.uBandCount, bandCount);
+    gl.uniform4fv(pFinal.u.uBandRect, this.bandRects);
+    gl.uniform2fv(pFinal.u.uBandShift, this.bandShifts);
+    gl.uniform1f(pFinal.u.uGrainAlpha, grainAmt > 0 ? GRAIN_ALPHA * (0.4 + 0.6 * grainAmt) : 0);
+    gl.uniform2f(pFinal.u.uGrainOffset, gx, gy);
+    gl.uniform1f(pFinal.u.uGrainSize, GRAIN_SIZE);
+    this.drawQuad();
+
+    this.timings = { ...this.timings, finalMs: performance.now() - t0 };
     return bands;
   }
 
-  drawBlurred(source) {
-    const { octx } = this;
-    const s = ctx2d(this.bgSmall);
-    s.drawImage(source, 0, 0, this.bgSmall.width, this.bgSmall.height);
-    const m = ctx2d(this.bgMid);
-    m.drawImage(this.bgSmall, 0, 0, this.bgMid.width, this.bgMid.height);
-    octx.drawImage(this.bgMid, 0, 0, this.out.width, this.out.height);
-  }
-
-  /** Shifts one band sideways and pulls R right / B left (channel split, no new colours). */
-  slipBand({ y, h, shift, split, x0 = 0, x1 = W }, W) {
-    const bx = Math.max(0, x0);
-    const bw = Math.min(W, x1) - bx;
-    if (bw < 1) return;
-    const src = this.octx.getImageData(0, y, W, h);
-    const dst = this.octx.createImageData(bw, h);
-    const s = src.data;
-    const d = dst.data;
-    const clampX = (x) => (x < 0 ? 0 : x >= W ? W - 1 : x);
-    for (let row = 0; row < h; row += 1) {
-      const base = row * W;
-      for (let x = bx; x < bx + bw; x += 1) {
-        const o = (row * bw + x - bx) * 4;
-        const xr = clampX(x - shift - split);
-        const xg = clampX(x - shift);
-        const xb = clampX(x - shift + split);
-        d[o] = s[(base + xr) * 4];
-        d[o + 1] = s[(base + xg) * 4 + 1];
-        d[o + 2] = s[(base + xb) * 4 + 2];
-        d[o + 3] = 255;
-      }
+  dispose() {
+    const { gl } = this;
+    this.clearBank();
+    for (const p of [this.pCopy, this.pPoly, this.pBlur, this.pPlateSeed, this.pPlateComp, this.pBankCrop, this.pPatch, this.pSlice, this.pFinal]) {
+      if (p?.prog) gl.deleteProgram(p.prog);
     }
-    this.octx.putImageData(dst, bx, y);
+    for (const f of [this.fboPlateA, this.fboPlateB, this.fboOvalA, this.fboOvalB, this.fboCollage, this.fboSliced, this.fboBgA, this.fboBgB, this.fboBank]) {
+      if (f?.fbo) gl.deleteFramebuffer(f.fbo);
+      if (f?.tex) gl.deleteTexture(f.tex);
+    }
+    gl.deleteTexture(this.texVideo);
+    gl.deleteTexture(this.texGrain);
+    gl.deleteBuffer(this.polyBuf);
+    gl.deleteVertexArray(this.emptyVao);
+    gl.deleteVertexArray(this.polyVao);
   }
 }
