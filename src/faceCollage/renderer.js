@@ -170,7 +170,9 @@ export class CollageRenderer {
       'uVideo', 'uOvalMask', 'uMirror', 'uSize', 'uBox', 'uFrame', 'uIod',
       'uCheekA', 'uCheekB', 'uCoverEyeA', 'uCoverEyeB', 'uCoverNose', 'uCoverMouth',
     ]);
-    this.pPlateComp = createProgram(gl, FULLSCREEN_VERT, PLATE_COMPOSITE_FRAG, ['uPlate', 'uOvalMask', 'uSize', 'uBox']);
+    this.pPlateComp = createProgram(gl, FULLSCREEN_VERT, PLATE_COMPOSITE_FRAG, [
+      'uPlate', 'uOvalMask', 'uVideo', 'uMirror', 'uSize', 'uBox', 'uFrame', 'uIod', 'uRealCheekTex',
+    ]);
     this.pBankCrop = createProgram(gl, FULLSCREEN_VERT, BANK_CROP_FRAG, ['uVideo', 'uMirror', 'uSize', 'uFrame', 'uIod', 'uFeat']);
     this.pPatch = createProgram(gl, PATCH_VERT, PATCH_FRAG, [
       'uSize', 'uFrame', 'uIod', 'uDestUV', 'uBoxWH', 'uScale', 'uRot', 'uFlipX',
@@ -301,15 +303,22 @@ export class CollageRenderer {
 
     // 2. Flattened skin plate masked by feathered face oval.
     if (plateBox) {
+      const hasCopies = layout.length > 3 ? 1 : 0;
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.useProgram(this.pPlateComp.prog);
       this.bindTex(0, this.fboPlateA.tex);
       this.bindTex(1, this.fboOvalA.tex);
+      this.bindTex(2, this.texVideo);
       gl.uniform1i(this.pPlateComp.u.uPlate, 0);
       gl.uniform1i(this.pPlateComp.u.uOvalMask, 1);
+      gl.uniform1i(this.pPlateComp.u.uVideo, 2);
+      gl.uniform1f(this.pPlateComp.u.uMirror, this.mirror ? 1 : 0);
       gl.uniform2f(this.pPlateComp.u.uSize, W, H);
       gl.uniform4f(this.pPlateComp.u.uBox, plateBox.bx, plateBox.by, plateBox.bw, plateBox.bh);
+      gl.uniform4f(this.pPlateComp.u.uFrame, face.frame.ox, face.frame.oy, face.frame.ax, face.frame.ay);
+      gl.uniform1f(this.pPlateComp.u.uIod, face.frame.iod);
+      gl.uniform1f(this.pPlateComp.u.uRealCheekTex, hasCopies);
       this.drawQuad();
     }
 

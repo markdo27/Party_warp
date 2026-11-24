@@ -26,11 +26,11 @@ const EYE_COVER_LIMIT = 0.3;
 const FACE_BAND = {
   thinH: [0.02, 0.055],
   thickH: [0.065, 0.125],
-  thinShare: 0.48,
+  thinShare: 0.46,
   shift: [0.07, 0.22],
-  sideShare: 0.9,
-  edgeU: 0.82,
-  reach: [0.95, 2.25],
+  sideShare: 0.94,
+  edgeU: 0.8,
+  reach: [1.0, 2.3],
   count: [10, 16],
   split: [1.5, 3.2],
 };

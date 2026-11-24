@@ -145,8 +145,13 @@ export const PLATE_COMPOSITE_FRAG = `#version 300 es
 precision highp float;
 uniform sampler2D uPlate;
 uniform sampler2D uOvalMask;
+uniform sampler2D uVideo;
+uniform float uMirror;
 uniform vec2 uSize;
 uniform vec4 uBox; // bx, by, bw, bh in pixels
+uniform vec4 uFrame;
+uniform float uIod;
+uniform float uRealCheekTex; // 0 on Minimal (pure flatten Q1), 1 on multi-copy collage (prevents flat cheek gaps R7)
 in vec2 vUv;
 out vec4 fragColor;
 void main() {
@@ -155,6 +160,17 @@ void main() {
   vec2 px = vec2(vUv.x * uSize.x, (1.0 - vUv.y) * uSize.y);
   vec2 pUv = vec2((px.x - uBox.x) / uBox.z, 1.0 - (px.y - uBox.y) / uBox.w);
   vec3 skin = texture(uPlate, clamp(pUv, 0.001, 0.999)).rgb;
+  // In multi-copy collage modes, restore subtle real photographic cheek/forehead shading outside the
+  // central nose/lip cover zone so exposed skin gaps never read as flat solid colour (R7).
+  if (uRealCheekTex > 0.5) {
+    vec2 d = px - uFrame.xy;
+    vec2 q = vec2(d.x * uFrame.z + d.y * uFrame.w, -d.x * uFrame.w + d.y * uFrame.z) / max(1.0, uIod);
+    float offNose = smoothstep(0.30, 0.48, abs(q.x)) + smoothstep(0.82, 0.96, q.y) + smoothstep(0.08, -0.08, q.y);
+    float safe = clamp(offNose, 0.0, 1.0) * smoothstep(0.25, 0.7, a);
+    vec2 vUvM = vec2(uMirror > 0.5 ? 1.0 - vUv.x : vUv.x, vUv.y);
+    vec3 live = texture(uVideo, clamp(vUvM, 0.001, 0.999)).rgb;
+    skin = mix(skin, live, safe * 0.55);
+  }
   // Subtle skin-plate tone match so patch rims melt invisibly into the flattened face.
   vec3 lift = vec3(1.0, 0.973, 0.941);
   skin = 1.0 - (1.0 - skin) * (1.0 - lift * 0.035);
@@ -279,9 +295,9 @@ vec2 sampleUv(vec2 localPos) {
 }
 
 void main() {
-  // Pixel size in patch-local face units for razor-sharp <= 1.5 px collage cut edge.
+  // Pixel size in patch-local face units for razor-sharp <= 2 px collage cut edge (Q3).
   float pxUnit = 1.0 / max(1.0, uIod * uScale);
-  float aa = pxUnit * 0.85;
+  float aa = pxUnit * 0.5;
 
   // 1. Organic anatomical contour mask (100% solid inside landmark hull + rim, smooth falloff outside).
   float sd = sdPolygon(vLocal, uPolyCount);
@@ -297,7 +313,7 @@ void main() {
     float dc = dot(vLocal, uCut.xy) - uCut.z;
     cutA = 1.0 - smoothstep(-aa, aa, dc);
     if (cutA < 0.003) discard;
-    float seamW = pxUnit * 2.2;
+    float seamW = pxUnit * 1.4;
     seam = smoothstep(-seamW, -aa * 0.25, dc) * cutA;
   }
 
@@ -351,7 +367,7 @@ out vec4 fragColor;
 
 void main() {
   float pxUnit = 1.0 / max(1.0, uIod);
-  float aa = pxUnit * 0.85;
+  float aa = pxUnit * 0.5;
   float hw = uBoxWH.x * 0.5;
   float hh = uBoxWH.y * 0.5;
 
@@ -381,11 +397,11 @@ void main() {
   if (uShade > 0.0) col = mix(col, vec3(1.0), uShade);
   else if (uShade < 0.0) col = mix(col, vec3(0.0), -uShade);
 
-  // Crisp collage cut shadows on bottom and angled outer cut edges.
-  float seamW = pxUnit * 2.4;
+  // Crisp collage cut shadows (<= 1.5 px) on bottom and angled outer cut edges.
+  float seamW = pxUnit * 1.4;
   float botSeam = smoothstep(-seamW, -aa * 0.2, dBot) * botA;
   float outSeam = smoothstep(-seamW, -aa * 0.2, dOuter) * outerA;
-  col *= (1.0 - max(botSeam, outSeam) * 0.20);
+  col *= (1.0 - max(botSeam, outSeam) * 0.18);
 
   fragColor = vec4(col, alpha * uGrow);
 }

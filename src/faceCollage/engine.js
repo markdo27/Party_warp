@@ -248,7 +248,7 @@ export class CollageEngine {
     this.countFps(t);
   }
 
-  /** Protects kept eyes AND the 2-tier nose band from stray full-width glitch bands (QA R4 R11). */
+  /** Protects eye cluster and 2-tier nose band from stray full-width glitch bands (QA R4/R5 R11). */
   protectedRows() {
     if (!this.face) return [];
     const { frame, features } = this.face;
@@ -257,6 +257,11 @@ export class CollageEngine {
       const half = EYE_BAND_IOD * frame.iod;
       return [y - half, y + half];
     });
+    if (this.params.counts.eye > 2) {
+      const y0 = toPixel(frame, { u: 0, v: -0.68 }).y;
+      const y1 = toPixel(frame, { u: 0, v: 0.05 }).y;
+      rows.push([Math.min(y0, y1), Math.max(y0, y1)]);
+    }
     if (this.params.counts.nose > 0) {
       const y0 = toPixel(frame, { u: 0, v: NOSE_BAND_V[0] }).y;
       const y1 = toPixel(frame, { u: 0, v: NOSE_BAND_V[1] }).y;
